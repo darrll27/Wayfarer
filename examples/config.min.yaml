@@ -1,0 +1,27 @@
+version: 1
+bridge_id: "wayfarer-bridge-01"
+
+mqtt:
+  host: "localhost"
+  port: 1883
+  client_id: "wayfarer-bridge-01"
+  topic_prefix: "wayfarer/v1"
+  qos: 0
+  retain_heartbeat: true
+
+transports:
+  mavlink_udp_14550:
+    type: mavlink_udp
+    endpoint: "udp:0.0.0.0:14550"
+  mavlink_udp_14551:
+    type: mavlink_udp
+    endpoint: "udp:0.0.0.0:14551"
+  mavlink_usb_main:
+    type: mavlink_serial
+    endpoint: "serial:/dev/cu.usbmodem01:115200"
+
+routes:
+  - from: "mavlink_udp_*"   # wildcard: all mavlink UDP inputs
+    to:   "mqtt"            # publish telem to MQTT
+  - from: "mqtt"
+    to:   "mavlink_udp_*"   # route commands from MQTT to all mavlink UDP outputs
