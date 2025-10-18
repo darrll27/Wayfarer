@@ -4,6 +4,7 @@ from wayfarer.core.bridge import Bridge
 from wayfarer.routers.mqtt_router import MQTTRouter
 from wayfarer.transports.mavlink_udp import MavlinkUDP
 from wayfarer.transports.mavlink_serial import MavlinkSerial
+from wayfarer.transports.mavlink_general import MavlinkGeneral
 
 def main():
     p = argparse.ArgumentParser("wayfarer")
@@ -31,6 +32,13 @@ def main():
                 endpoint=tcfg["endpoint"],
                 on_discover=None,
                 on_packet=None
+            )
+        elif tcfg["type"] == "mavlink_general":
+            transports[name] = MavlinkGeneral(
+                name=name,
+                endpoint=tcfg["endpoint"],
+                on_discover=None,
+                on_packet=None,
             )
 
 

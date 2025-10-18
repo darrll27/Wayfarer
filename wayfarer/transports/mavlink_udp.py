@@ -2,6 +2,7 @@ import time, threading, queue
 from typing import Optional
 from pymavlink import mavutil
 from wayfarer.core.packet import Packet
+from wayfarer.core.command_mapper import send_command
 
 class MavlinkUDP:
     def __init__(self, name: str, endpoint: str, on_discover, on_packet):
@@ -56,7 +57,9 @@ class MavlinkUDP:
                 raw = pkt.fields.get("raw")
                 if raw and isinstance(raw, (bytes, bytearray)):
                     self._conn.write(raw)
-                # Future: map normalized commands -> mavlink pack + send
+                else:
+                    # Structured mapping
+                    send_command(self._conn, pkt)
             except queue.Empty:
                 continue
             except Exception:
