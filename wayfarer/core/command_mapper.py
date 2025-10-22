@@ -66,8 +66,28 @@ def send_command(conn, pkt: Packet):
             cmd_name = pkt.fields.get("command")
             cmd_id = _resolve_mav_cmd_id(cmd_name)
             params = _ensure_params_len(pkt.fields.get("params", [0] * 7), 7)
-            target_sysid = pkt.fields.get("target_sysid", 1)
-            target_compid = pkt.fields.get("target_compid", 1)
+            # Resolve target system id with explicit precedence:
+            # 1) pkt.fields['target_sysid']
+            # 2) pkt.fields['sysid']
+            # 3) extract from pkt.device_id (e.g., 'mav_sys3')
+            # If none found, do NOT silently fall back to 1 — skip sending and log.
+            target_sysid = pkt.fields.get("target_sysid")
+            if target_sysid is None:
+                target_sysid = pkt.fields.get("sysid")
+            if target_sysid is None and getattr(pkt, "device_id", None):
+                # try parse device_id like 'mav_sys3'
+                try:
+                    if isinstance(pkt.device_id, str) and pkt.device_id.startswith("mav_sys"):
+                        target_sysid = int(pkt.device_id.split("mav_sys", 1)[1])
+                except Exception:
+                    target_sysid = None
+            if target_sysid is None:
+                print(f"[ERROR] No target sysid found in packet (fields or device_id); not sending command")
+                return
+
+            target_compid = pkt.fields.get("target_compid")
+            if target_compid is None:
+                target_compid = pkt.fields.get("compid", 1)
             conn.mav.command_long_send(
                 target_sysid,
                 target_compid,
@@ -83,5 +103,15 @@ def send_command(conn, pkt: Packet):
             )
         else:
             print(f"[WARN] No handler for msg_type={msg_type}")
+        print(f"[DEBUG] send_command() sent msg_type={msg_type} for device_id={pkt.device_id}")
     except Exception as e:
         print(f"[ERROR] send_command() failed: {e}")
+
+
+# Export supported message types for discovery/manifest
+SUPPORTED_MSG_TYPES = ["COMMAND_LONG", "SET_MODE"]
+
+
+def get_supported_msg_types():
+    """Return list of msg_type strings that command_mapper supports."""
+    return list(SUPPORTED_MSG_TYPES)
