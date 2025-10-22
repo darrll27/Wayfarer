@@ -101,6 +101,48 @@ def send_command(conn, pkt: Packet):
                 pkt.fields.get("base_mode", 209),
                 pkt.fields.get("custom_mode", 4),
             )
+        elif msg_type == "MISSION_UPLOAD":
+            # Handle mission upload: expects 'mission_items' in fields
+            mission_items = pkt.fields.get("mission_items")
+            target_sysid = pkt.fields.get("target_sysid") or pkt.fields.get("sysid")
+            if target_sysid is None and getattr(pkt, "device_id", None):
+                try:
+                    if isinstance(pkt.device_id, str) and pkt.device_id.startswith("mav_sys"):
+                        target_sysid = int(pkt.device_id.split("mav_sys", 1)[1])
+                except Exception:
+                    target_sysid = None
+            if target_sysid is None:
+                print(f"[ERROR] No target sysid found in mission upload packet; not sending mission")
+                return
+            target_compid = pkt.fields.get("target_compid") or pkt.fields.get("compid", 1)
+            if not mission_items or not isinstance(mission_items, list):
+                print(f"[ERROR] No mission_items found or not a list in mission upload packet")
+                return
+            # Send each mission item as a MAVLink MISSION_ITEM_INT message
+            for idx, item in enumerate(mission_items):
+                lat = int(item.get("lat", 0) * 1e7)
+                lon = int(item.get("lon", 0) * 1e7)
+                alt = int(item.get("alt", 0))
+                seq = idx
+                frame = item.get("frame", 3)  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+                command = item.get("command", 16)  # MAV_CMD_NAV_WAYPOINT
+                current = 1 if idx == 0 else 0
+                autocontinue = item.get("autocontinue", 1)
+                params = item.get("params", [0]*7)
+                conn.mav.mission_item_int_send(
+                    target_sysid,
+                    target_compid,
+                    seq,
+                    frame,
+                    command,
+                    current,
+                    autocontinue,
+                    lat,
+                    lon,
+                    alt,
+                    *params
+                )
+            print(f"[INFO] MISSION_UPLOAD: sent {len(mission_items)} items for device_id={pkt.device_id}")
         else:
             print(f"[WARN] No handler for msg_type={msg_type}")
         print(f"[DEBUG] send_command() sent msg_type={msg_type} for device_id={pkt.device_id}")
