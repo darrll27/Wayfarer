@@ -3,6 +3,7 @@ import json
 import paho.mqtt.client as mqtt
 import time
 import os
+import threading
 from topic_schema import choose_command_topic, format_topic
 # import helpers we factored out
 from helpers import (
@@ -26,6 +27,11 @@ class Pathfinder:
             "host": "localhost", "port": 1883, "client_id": "pathfinder-controller", "topic_prefix": "wayfarer/v1", "qos": 0
         })
         self.topic_prefix = self.mqtt_cfg.get("topic_prefix", "wayfarer/v1")
+        # Monitoring settings (optional in config under 'monitoring')
+        mon = self.cfg.get("monitoring") if isinstance(self.cfg.get("monitoring"), dict) else {}
+        self.monitor_publish_hz = float((mon or {}).get("publish_hz", 1.0))
+        # Default to 60s post-start if unspecified
+        self.monitor_duration_secs = (mon or {}).get("duration_secs", 60)
 
     def _load_config(self):
         if os.path.exists(self.config_path):
@@ -186,39 +192,10 @@ class Pathfinder:
 
         waypoints = [to_mission_item(idx, item) for idx, item in enumerate(raw_waypoints)]
 
-        # --- Send MISSION_UPLOAD to all sysids in the group ---
-        for sysid in group.get('sysids', [sysid]):
-            device_id = f"mav_sys{sysid}"
-            mission_upload_topic = self.format_topic(manifest, "mission_upload", sysid=sysid, device_id=device_id)
-            mission_upload_payload = {
-                "msg_type": "MISSION_UPLOAD",
-                "sysid": sysid,
-                "compid": compid,
-                "mission_items": waypoints
-            }
-            self.publish_json(client, mission_upload_topic, mission_upload_payload, qos=self.mqtt_cfg.get("qos",0))
-            print(f"[{group_name}-{sysid}] Sent MISSION_UPLOAD with {len(waypoints)} items -> {mission_upload_topic}")
+        # --- Mission upload to all sysids ---
+        self._send_mission_upload_to_all(client, manifest, group_name, group, waypoints, compid)
 
-        # After sending all mission items, wait for MISSION_ACK
-        ack_topic = f"{self.topic_prefix}/mavlink/{sysid}/mission_response"
-        ack_received = False
-        def on_ack(client, userdata, msg):
-            try:
-                payload = json.loads(msg.payload)
-                if payload.get("msg_type") == "MISSION_ACK":
-                    print(f"[{group_name}-{sysid}] MISSION_ACK received: {payload}")
-                    nonlocal ack_received
-                    ack_received = True
-            except Exception:
-                pass
-        client.subscribe(ack_topic)
-        client.on_message = on_ack
-        # Wait for MISSION_ACK (timeout 10s)
-        start = time.time()
-        while not ack_received and time.time() - start < 10:
-            time.sleep(0.1)
-        if not ack_received:
-            print(f"[{group_name}-{sysid}] Timeout waiting for MISSION_ACK on {ack_topic}")
+        # Do not block on mission ACK; Wayfarer handles MAVLink handshake internally
 
         # resolve optional preflight file (group-specific or shared). If none found, fall back to
         # a `preflight` sequence defined directly in the main config (common to all drones).
@@ -239,98 +216,221 @@ class Pathfinder:
         # detect if preflight already includes an arming command (MAV_CMD_COMPONENT_ARM_DISARM == 400)
         preflight_has_arm = any((isinstance(item, dict) and (item.get("command") == 400 or item.get("action") == "arm")) for item in preflight)
 
-        for sysid in group.get('sysids', []):
-            device_id = f"mav_sys{sysid}"
+        sysids_list = group.get('sysids', []) or []
+        stagger_secs = float(group.get('stagger_secs', self.cfg.get('stagger_secs', 0)))
 
-            # discovery (optional)
-            discovery_topic = self.format_topic(manifest, "discovery", device_id=device_id, sysid=sysid)
-            if discovery_topic:
-                discovery_payload = {"schema": "mavlink", "sysid": sysid, "source": "pathfinder"}
-                self.publish_json(client, discovery_topic, discovery_payload, qos=self.mqtt_cfg.get("qos",0), retain=True)
-                # record discovery advertisement in tracker as info
-                tracker.record_command(sysid, action="discovery", topic=discovery_topic, payload=discovery_payload)
-                tracker.publish_log(client, self.topic_prefix, sysid, qos=self.mqtt_cfg.get("qos",0))
-                print(f"[{group_name}-{sysid}] Published discovery -> {discovery_topic}")
+        def sysid_worker(sysid, start_delay):
+            try:
+                if start_delay > 0:
+                    time.sleep(start_delay)
 
-            time.sleep(1)
+                device_id = f"mav_sys{sysid}"
 
-            # execute preflight commands (per-sysid) before takeoff
-            if preflight:
-                for item in preflight:
-                    cmd = item.get("command")
-                    params = item.get("params", [0]*7)
-                    # normalized COMMAND_LONG-style payload expected by the bridge
-                    cmd_topic, chosen_key = publish_mav_command(
-                        client, manifest, sysid, device_id, cmd, params=params,
-                        action=item.get("action", "preflight"), qos=self.mqtt_cfg.get("qos", 0),
-                        tracker=tracker, topic_prefix=self.topic_prefix
-                    )
-                    if not cmd_topic:
-                        print(f"[{group_name}-{sysid}] ERROR: no command topic resolved for preflight command — aborting")
-                        client.loop_stop(); client.disconnect(); return
-                    print(f"[{group_name}-{sysid}] Sent preflight cmd -> [{chosen_key}] {cmd_topic}")
-                    time.sleep(item.get("delay", 0.5))
+                # discovery (optional)
+                discovery_topic = self.format_topic(manifest, "discovery", device_id=device_id, sysid=sysid)
+                if discovery_topic:
+                    discovery_payload = {"schema": "mavlink", "sysid": sysid, "source": "pathfinder"}
+                    self.publish_json(client, discovery_topic, discovery_payload, qos=self.mqtt_cfg.get("qos",0), retain=True)
+                    tracker.record_command(sysid, action="discovery", topic=discovery_topic, payload=discovery_payload)
+                    tracker.publish_log(client, self.topic_prefix, sysid, qos=self.mqtt_cfg.get("qos",0))
+                    print(f"[{group_name}-{sysid}] Published discovery -> {discovery_topic}")
 
-            # send ARM if preflight didn't include it already
-            if not preflight_has_arm:
-                arm_cmd = 400  # MAV_CMD_COMPONENT_ARM_DISARM
-                arm_params = [1, 0, 0, 0, 0, 0, 0]  # param1=1 to arm
-                cmd_topic, chosen_key = publish_mav_command(
-                    client, manifest, sysid, device_id, arm_cmd, params=arm_params,
-                    action="arm", qos=self.mqtt_cfg.get("qos",0), tracker=tracker, topic_prefix=self.topic_prefix
-                )
-                if not cmd_topic:
-                    print(f"[{group_name}-{sysid}] ERROR: no command topic resolved for arm — aborting")
-                    client.loop_stop(); client.disconnect(); return
-                print(f"[{group_name}-{sysid}] Sent arm via [{chosen_key}] -> {cmd_topic}")
-                # give vehicle a moment to arm before takeoff
                 time.sleep(1)
 
-            # choose best command topic using centralized resolver
-            cmd_topic, chosen_key = choose_command_topic(manifest, sysid, device_id=device_id, action="takeoff")
-            if not cmd_topic:
-                print(f"[{group_name}-{sysid}] ERROR: no command topic resolved for takeoff — aborting")
-                client.loop_stop(); client.disconnect(); return
-            # choose altitude and MAV command depending on waypoint type
-            if waypoint_type == "absolute":
-                # use NAV_TAKEOFF (22) where altitude is treated as absolute
-                takeoff_alt = waypoints[0].get("alt", 10)
-                takeoff_cmd = 22
-            else:
-                # use NAV_TAKEOFF_LOCAL (24) to indicate the altitude is relative/local
-                takeoff_alt = waypoints[0].get("z", 10)
-                takeoff_cmd = 24
+                # execute preflight commands (per-sysid) before takeoff
+                if preflight:
+                    for item in preflight:
+                        cmd = item.get("command")
+                        params = item.get("params", [0]*7)
+                        cmd_topic, chosen_key = publish_mav_command(
+                            client, manifest, sysid, device_id, cmd, params=params,
+                            action=item.get("action", "preflight"), qos=self.mqtt_cfg.get("qos", 0),
+                            tracker=tracker, topic_prefix=self.topic_prefix
+                        )
+                        if not cmd_topic:
+                            print(f"[{group_name}-{sysid}] ERROR: no command topic resolved for preflight command — aborting")
+                            return
+                        print(f"[{group_name}-{sysid}] Sent preflight cmd -> [{chosen_key}] {cmd_topic}")
+                        time.sleep(item.get("delay", 0.5))
 
-            takeoff_params = [0, 0, 0, 0, 0, 0, takeoff_alt]
+                # send ARM if preflight didn't include it already
+                if not preflight_has_arm:
+                    arm_cmd = 400  # MAV_CMD_COMPONENT_ARM_DISARM
+                    arm_params = [1, 0, 0, 0, 0, 0, 0]
+                    cmd_topic, chosen_key = publish_mav_command(
+                        client, manifest, sysid, device_id, arm_cmd, params=arm_params,
+                        action="arm", qos=self.mqtt_cfg.get("qos",0), tracker=tracker, topic_prefix=self.topic_prefix
+                    )
+                    if not cmd_topic:
+                        print(f"[{group_name}-{sysid}] ERROR: no command topic resolved for arm — aborting")
+                        return
+                    print(f"[{group_name}-{sysid}] Sent arm via [{chosen_key}] -> {cmd_topic}")
+                    time.sleep(1)
 
-            cmd_topic, chosen_key = publish_mav_command(
-                client, manifest, sysid, device_id, takeoff_cmd, params=takeoff_params,
-                action="takeoff", qos=self.mqtt_cfg.get("qos",0), tracker=tracker, topic_prefix=self.topic_prefix
-            )
-            if not cmd_topic:
-                print(f"[{group_name}] ERROR: no command topic resolved for takeoff — aborting")
-                client.loop_stop(); client.disconnect(); return
-            print(f"[{group_name}-{sysid}] Sent takeoff via [{chosen_key}] -> {cmd_topic}")
+                # choose best command topic using centralized resolver
+                cmd_topic, chosen_key = choose_command_topic(manifest, sysid, device_id=device_id, action="takeoff")
+                if not cmd_topic:
+                    print(f"[{group_name}-{sysid}] ERROR: no command topic resolved for takeoff — aborting")
+                    return
+                # choose altitude and MAV command depending on waypoint type
+                if waypoint_type == "absolute":
+                    takeoff_alt = waypoints[0].get("alt", 10)
+                    takeoff_cmd = 22
+                else:
+                    takeoff_alt = waypoints[0].get("z", 10)
+                    takeoff_cmd = 24
 
-            time.sleep(2)
+                takeoff_params = [0, 0, 0, 0, 0, 0, takeoff_alt]
 
-            # start mission (existing logic) - record & publish
-            cmd_topic, chosen_key = choose_command_topic(manifest, sysid, device_id=device_id, action="start")
-            if not cmd_topic:
-                print(f"[{group_name}-{sysid}] ERROR: no command topic resolved for start — aborting")
-                client.loop_stop(); client.disconnect(); return
-            start_payload = {"schema": "mavlink", "msg_type": "COMMAND_LONG", "sysid": sysid, "command": 300, "params": [0,0,0,0,0,0,0]}
-            cmd_topic, chosen_key = publish_mav_command(
-                client, manifest, sysid, device_id, 300, params=start_payload.get("params"),
-                action="start", qos=self.mqtt_cfg.get("qos",0), tracker=tracker, topic_prefix=self.topic_prefix
-            )
-            if not cmd_topic:
-                print(f"[{group_name}] ERROR: no command topic resolved for start — aborting")
-                client.loop_stop(); client.disconnect(); return
-            print(f"[{group_name}-{sysid}] Sent start via [{chosen_key}] -> {cmd_topic}")
+                cmd_topic, chosen_key = publish_mav_command(
+                    client, manifest, sysid, device_id, takeoff_cmd, params=takeoff_params,
+                    action="takeoff", qos=self.mqtt_cfg.get("qos",0), tracker=tracker, topic_prefix=self.topic_prefix
+                )
+                if not cmd_topic:
+                    print(f"[{group_name}] ERROR: no command topic resolved for takeoff — aborting")
+                    return
+                print(f"[{group_name}-{sysid}] Sent takeoff via [{chosen_key}] -> {cmd_topic}")
 
+                time.sleep(2)
+
+                # start mission (existing logic) - record & publish
+                cmd_topic, chosen_key = choose_command_topic(manifest, sysid, device_id=device_id, action="start")
+                if not cmd_topic:
+                    print(f"[{group_name}-{sysid}] ERROR: no command topic resolved for start — aborting")
+                    return
+                start_params = [0,0,0,0,0,0,0]
+                cmd_topic, chosen_key = publish_mav_command(
+                    client, manifest, sysid, device_id, 300, params=start_params,
+                    action="start", qos=self.mqtt_cfg.get("qos",0), tracker=tracker, topic_prefix=self.topic_prefix
+                )
+                if not cmd_topic:
+                    print(f"[{group_name}] ERROR: no command topic resolved for start — aborting")
+                    return
+                print(f"[{group_name}-{sysid}] Sent start via [{chosen_key}] -> {cmd_topic}")
+            except Exception:
+                # keep worker resilient
+                pass
+
+        threads = []
+        for idx, sid in enumerate(sysids_list):
+            delay = idx * max(stagger_secs, 0.0)
+            t = threading.Thread(target=sysid_worker, args=(sid, delay), daemon=True)
+            t.start()
+            threads.append(t)
+
+        # --- Start continued active monitoring (GPS + checkpoint) ---
+        self._start_active_monitoring(client, manifest, group_name, group)
+
+        # Keep client alive for monitoring duration then close
+        try:
+            time.sleep(float(self.monitor_duration_secs))
+        except Exception:
+            pass
         client.loop_stop()
         client.disconnect()
+
+    # --- helpers ---
+    def _send_mission_upload_to_all(self, client, manifest, group_name, group, waypoints, compid=1):
+        sysids = group.get('sysids') or []
+        if not isinstance(sysids, list):
+            sysids = [sysids]
+        if not sysids:
+            sysids = [1]
+        for sid in sysids:
+            device_id = f"mav_sys{sid}"
+            mission_upload_topic = self.format_topic(manifest, "mission_upload", sysid=sid, device_id=device_id)
+            mission_upload_payload = {
+                "msg_type": "MISSION_UPLOAD",
+                "sysid": sid,
+                "compid": compid,
+                "mission_items": waypoints
+            }
+            self.publish_json(client, mission_upload_topic, mission_upload_payload, qos=self.mqtt_cfg.get("qos",0))
+            print(f"[{group_name}-{sid}] Sent MISSION_UPLOAD with {len(waypoints)} items -> {mission_upload_topic}")
+
+    def _start_active_monitoring(self, client, manifest, group_name, group):
+        """Subscribe to raw MAVLink telemetry and publish per-sysid state (GPS + checkpoint).
+        Publishes to: {topic_prefix}/pathfinder/sysid_<sysid>/state
+        """
+        root = self.topic_prefix
+        topic_filter = f"{root}/devices/+/telem/raw/mavlink/+"
+        client.subscribe(topic_filter, qos=0)
+
+        # Build device_id -> sysid map
+        devmap = {}
+        try:
+            for dev_id, info in (manifest.get("devices") or {}).items():
+                sid = info.get("sysid")
+                if sid is not None:
+                    devmap[dev_id] = int(sid)
+        except Exception:
+            pass
+
+        group_sysids = set(group.get('sysids', []) or [])
+        last_seq = {}
+        last_gps = {}
+
+        def on_raw(_cl, _ud, msg):
+            try:
+                payload = json.loads(msg.payload.decode("utf-8"))
+            except Exception:
+                try:
+                    payload = yaml.safe_load(msg.payload)
+                except Exception:
+                    return
+            parts = msg.topic.split('/')
+            mtype = parts[-1] if parts else None
+            # extract device_id from topic
+            device_id = None
+            try:
+                didx = parts.index('devices') + 1
+                device_id = parts[didx]
+            except Exception:
+                device_id = None
+            sysid = devmap.get(device_id)
+            if group_sysids and (sysid not in group_sysids):
+                return
+
+            if mtype == 'MISSION_CURRENT':
+                seq = payload.get('seq')
+                if seq is not None and sysid is not None:
+                    last_seq[sysid] = int(seq)
+            elif mtype in ('GLOBAL_POSITION_INT', 'GPS_RAW_INT', 'GPS2_RAW'):
+                lat = payload.get('lat')
+                lon = payload.get('lon')
+                alt = payload.get('alt') or payload.get('alt_ellipsoid') or payload.get('alt_msl')
+                try:
+                    if isinstance(lat, (int, float)) and abs(lat) > 90:
+                        lat = lat / 1e7
+                    if isinstance(lon, (int, float)) and abs(lon) > 180:
+                        lon = lon / 1e7
+                    if isinstance(alt, (int, float)) and abs(alt) > 10000:
+                        alt = alt / 1000.0
+                except Exception:
+                    pass
+                if (lat is not None) and (lon is not None) and (sysid is not None):
+                    last_gps[sysid] = {"lat": float(lat), "lon": float(lon), "alt": float(alt) if alt is not None else None}
+
+        client.message_callback_add(topic_filter, on_raw)
+
+        def publisher_loop():
+            period = 1.0 / max(self.monitor_publish_hz, 0.1)
+            while True:
+                now = time.time()
+                targets = group_sysids or set(last_gps.keys())
+                for sid in targets:
+                    state = {"group": group_name, "sysid": sid, "checkpoint": last_seq.get(sid), "t": now}
+                    gps = last_gps.get(sid)
+                    if gps:
+                        state.update({"lat": gps.get("lat"), "lon": gps.get("lon"), "alt": gps.get("alt")})
+                    topic = f"{root}/pathfinder/sysid_{sid}/state"
+                    try:
+                        client.publish(topic, json.dumps(state), qos=self.mqtt_cfg.get("qos",0), retain=False)
+                    except Exception:
+                        pass
+                time.sleep(period)
+
+        threading.Thread(target=publisher_loop, daemon=True).start()
 
 # module-level helper for multiprocessing entrypoint (picklable)
 def run_group_process(config_path, group_name):
