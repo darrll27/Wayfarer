@@ -1,0 +1,27 @@
+version: 1
+pathfinder_id: "pathfinder-controller-02"
+
+# default folder where all waypoint files live (relative to this config/script)
+waypoints_folder: "waypoints"
+waypoint_type: "absolute"
+groups:
+  alpha:
+    sysids:
+      - 2
+
+# common preflight sequence applied when no group-specific preflight_file is present
+preflight:
+  - command: 176   # MAV_CMD_REQUEST_MESSAGE (example: request heartbeat/status)
+    params: [0,0,0,0,0,0,0]
+    action: "preflight"
+    delay: 0.2
+
+  - command: 400   # MAV_CMD_COMPONENT_ARM_DISARM -> arm
+    params: [1,0,0,0,0,0,0]
+    action: "arm"
+    delay: 0.5
+
+  - command: 191   # MAV_CMD_DO_SET_MODE (example, no-op depending on system)
+    params: [0,0,0,0,0,0,0]
+    action: "preflight"
+    delay: 0.2

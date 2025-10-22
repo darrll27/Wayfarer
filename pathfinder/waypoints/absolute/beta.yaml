@@ -1,0 +1,25 @@
+#meta:
+  #frame: "WGS84"   # absolute GPS coordinates
+  #datum: "WGS84"
+
+waypoints:
+  - lat: 37.412545
+    lon: -121.9980
+    alt: 52
+    frame: 6  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    action: "takeoff"
+  - lat: 37.413045
+    lon: -121.9982
+    alt: 57
+    frame: 6  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    action: "waypoint"
+  - lat: 37.413545
+    lon: -121.9984
+    alt: 61
+    frame: 6  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    action: "waypoint"
+  - lat: 37.414045
+    lon: -121.9986
+    alt: 54
+    frame: 6  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    action: "land"

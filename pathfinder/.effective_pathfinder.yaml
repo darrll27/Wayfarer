@@ -1,0 +1,48 @@
+groups:
+  alpha:
+    sysids:
+    - 1
+mqtt:
+  client_id: pathfinder-controller
+  host: localhost
+  port: 1883
+  qos: 0
+  topic_prefix: wayfarer/v1
+pathfinder_id: pathfinder-controller-02
+preflight:
+- action: preflight
+  command: 176
+  delay: 0.2
+  params:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+- action: arm
+  command: 400
+  delay: 0.5
+  params:
+  - 1
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+- action: preflight
+  command: 191
+  delay: 0.2
+  params:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+version: 1
+waypoint_type: relative
+waypoints_folder: waypoints

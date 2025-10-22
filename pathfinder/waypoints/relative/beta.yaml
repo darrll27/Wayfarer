@@ -1,0 +1,23 @@
+meta:
+  frame: "LOCAL_NED"   # relative coordinates (N, E, D) from home/origin
+  origin:
+    x: 0
+    y: 0
+    z: 0
+
+waypoints:
+  - x: 0
+    y: 0
+    z: 10
+    frame: 3  # MAV_FRAME_LOCAL_NED
+    action: "takeoff"
+  - x: 10
+    y: 0
+    z: 20
+    frame: 3  # MAV_FRAME_LOCAL_NED
+    action: "waypoint"
+  - x: 20
+    y: 10
+    z: 15
+    frame: 3  # MAV_FRAME_LOCAL_NED
+    action: "land"

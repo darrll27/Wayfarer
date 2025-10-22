@@ -74,6 +74,7 @@ venv.bak/
 # Logs
 *.log
 logs/
+.logs
 
 # Local configs (optional)
 *.local.yaml

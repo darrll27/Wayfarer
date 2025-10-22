@@ -1,0 +1,21 @@
+version: 1
+bridge_id: "wayfarer-bridge-01"
+
+mqtt:
+  host: "localhost"
+  port: 1883
+  client_id: "wayfarer-bridge-01"
+  topic_prefix: "wayfarer/v1"
+  qos: 0
+  retain_heartbeat: true
+
+transports:
+  mavlink_udp_14551:
+    type: mavlink_udp
+    endpoint: "udpin:0.0.0.0:14551"
+
+routes:
+  - from: "mavlink_udp_*"
+    to:   "mqtt"
+  - from: "mqtt"
+    to:   "mavlink_udp_*"
