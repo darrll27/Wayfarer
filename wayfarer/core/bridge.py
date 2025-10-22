@@ -27,6 +27,11 @@ class Bridge:
         # start MQTT and subscribe to command wildcard
         self.mqtt.start()
         self.mqtt.subscribe_cmd(CMD_WILDCARD.format(root=self.root))
+        # also subscribe to mission upload wildcard so mission uploads are received by the bridge
+        try:
+            self.mqtt.subscribe_cmd(f"{self.root}/sysid_+/mission/upload")
+        except Exception:
+            pass
 
         # publish manifest so external APIs can discover exact topics/patterns
         # publish immediately (before transports start) so manifest is available
@@ -126,6 +131,9 @@ class Bridge:
             # No device_id known -> broadcast to all transports
             target_transports = set(self.transports.keys())
 
+        # If topic looks like a mission upload endpoint, prefer a well-known msg_type
+        is_mission_upload = topic.endswith('/mission/upload') or '/mission/upload' in topic
+
         for tname in target_transports:
             t = self.transports.get(tname)
             if not t:
@@ -133,7 +141,7 @@ class Bridge:
             pkt = Packet(
                 device_id=device_id,
                 schema=payload.get("schema", "mavlink"),
-                msg_type=payload.get("msg_type", "raw"),
+                msg_type=("MISSION_UPLOAD" if is_mission_upload else payload.get("msg_type", "raw")),
                 fields=payload,
                 timestamp=time.time(),
                 origin="mqtt"
