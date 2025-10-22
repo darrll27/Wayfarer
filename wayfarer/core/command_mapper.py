@@ -8,6 +8,7 @@ types are needed.
 from typing import Sequence
 from pymavlink import mavutil
 from wayfarer.core.packet import Packet
+import time
 
 
 def _ensure_params_len(params: Sequence[float], n: int = 7) -> list:
@@ -59,6 +60,7 @@ def send_command(conn, pkt: Packet):
     Supports:
       - COMMAND_LONG
       - SET_MODE
+      - MISSION_UPLOAD
     """
     msg_type = pkt.msg_type
     try:
@@ -118,6 +120,13 @@ def send_command(conn, pkt: Packet):
             if not mission_items or not isinstance(mission_items, list):
                 print(f"[ERROR] No mission_items found or not a list in mission upload packet")
                 return
+            # Send MISSION_COUNT first
+            conn.mav.mission_count_send(
+                target_sysid,
+                target_compid,
+                len(mission_items)
+            )
+            print(f"[INFO] MISSION_UPLOAD: sent MISSION_COUNT={len(mission_items)} for device_id={pkt.device_id}")
             # Send each mission item as a MAVLink MISSION_ITEM_INT message
             for idx, item in enumerate(mission_items):
                 seq = idx
@@ -126,14 +135,19 @@ def send_command(conn, pkt: Packet):
                 current = 1 if idx == 0 else 0
                 autocontinue = item.get("autocontinue", 1)
                 params = item.get("params", [0]*7)
-                # param1-param4, x, y, z
                 param1 = params[0] if len(params) > 0 else 0
                 param2 = params[1] if len(params) > 1 else 0
                 param3 = params[2] if len(params) > 2 else 0
                 param4 = params[3] if len(params) > 3 else 0
-                x = int(item.get("lat", 0) * 1e7)
-                y = int(item.get("lon", 0) * 1e7)
-                z = int(item.get("alt", 0))
+                # Accept both lat/lon/alt and x/y/z
+                if "lat" in item and "lon" in item and "alt" in item:
+                    x = int(item.get("lat", 0) * 1e7)
+                    y = int(item.get("lon", 0) * 1e7)
+                    z = int(item.get("alt", 0))
+                else:
+                    x = int(item.get("x", 0) * 1e7)
+                    y = int(item.get("y", 0) * 1e7)
+                    z = int(item.get("z", 0))
                 conn.mav.mission_item_int_send(
                     target_sysid,
                     target_compid,
@@ -150,7 +164,9 @@ def send_command(conn, pkt: Packet):
                     y,
                     z
                 )
+                print(f"[DEBUG] MISSION_UPLOAD: sent MISSION_ITEM_INT seq={seq} for device_id={pkt.device_id}")
             print(f"[INFO] MISSION_UPLOAD: sent {len(mission_items)} items for device_id={pkt.device_id}")
+            # No blocking wait for MISSION_ACK
         else:
             print(f"[WARN] No handler for msg_type={msg_type}")
         print(f"[DEBUG] send_command() sent msg_type={msg_type} for device_id={pkt.device_id}")
