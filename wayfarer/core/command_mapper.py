@@ -120,15 +120,20 @@ def send_command(conn, pkt: Packet):
                 return
             # Send each mission item as a MAVLink MISSION_ITEM_INT message
             for idx, item in enumerate(mission_items):
-                lat = int(item.get("lat", 0) * 1e7)
-                lon = int(item.get("lon", 0) * 1e7)
-                alt = int(item.get("alt", 0))
                 seq = idx
                 frame = item.get("frame", 3)  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
                 command = item.get("command", 16)  # MAV_CMD_NAV_WAYPOINT
                 current = 1 if idx == 0 else 0
                 autocontinue = item.get("autocontinue", 1)
                 params = item.get("params", [0]*7)
+                # param1-param4, x, y, z
+                param1 = params[0] if len(params) > 0 else 0
+                param2 = params[1] if len(params) > 1 else 0
+                param3 = params[2] if len(params) > 2 else 0
+                param4 = params[3] if len(params) > 3 else 0
+                x = int(item.get("lat", 0) * 1e7)
+                y = int(item.get("lon", 0) * 1e7)
+                z = int(item.get("alt", 0))
                 conn.mav.mission_item_int_send(
                     target_sysid,
                     target_compid,
@@ -137,10 +142,13 @@ def send_command(conn, pkt: Packet):
                     command,
                     current,
                     autocontinue,
-                    lat,
-                    lon,
-                    alt,
-                    *params
+                    param1,
+                    param2,
+                    param3,
+                    param4,
+                    x,
+                    y,
+                    z
                 )
             print(f"[INFO] MISSION_UPLOAD: sent {len(mission_items)} items for device_id={pkt.device_id}")
         else:

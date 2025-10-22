@@ -3,7 +3,7 @@ from queue import Queue
 from wayfarer.core.registry import DeviceRegistry
 from wayfarer.core.constants import (
     TOPIC_VERSION, DISCOVERY_TOPIC, HEARTBEAT_TOPIC, RAW_MAVLINK_TOPIC,
-    CMD_WILDCARD
+    MISSION_UPLOAD_TOPIC, CMD_ROOT_TOPIC
 )
 from wayfarer.core.packet import Packet
 from wayfarer.core.router import RouteTable
@@ -24,14 +24,12 @@ class Bridge:
     # --- lifecycle ---
     def start(self):
         self._run = True
-        # start MQTT and subscribe to command wildcard
+        # start MQTT and subscribe to device-agnostic command and mission upload topics only
         self.mqtt.start()
-        self.mqtt.subscribe_cmd(CMD_WILDCARD.format(root=self.root))
-        # also subscribe to mission upload wildcard so mission uploads are received by the bridge
-        try:
-            self.mqtt.subscribe_cmd(f"{self.root}/sysid_+/mission/upload")
-        except Exception:
-            pass
+        # Subscribe to generic command topic (all actions)
+        self.mqtt.subscribe_cmd(CMD_ROOT_TOPIC.format(root=self.root, action="+"))
+        # Subscribe to generic mission upload topic
+        self.mqtt.subscribe_cmd(MISSION_UPLOAD_TOPIC.format(root=self.root))
 
         # publish manifest so external APIs can discover exact topics/patterns
         # publish immediately (before transports start) so manifest is available
@@ -132,6 +130,7 @@ class Bridge:
             target_transports = set(self.transports.keys())
 
         # If topic looks like a mission upload endpoint, prefer a well-known msg_type
+            print(f"[DEBUG] on_cmd: topic={topic} device_id={device_id} is_mission_upload={is_mission_upload} payload={payload}")
         is_mission_upload = topic.endswith('/mission/upload') or '/mission/upload' in topic
 
         for tname in target_transports:
@@ -170,9 +169,10 @@ class Bridge:
                             "rollspeed": pkt.fields.get("rollspeed"),
                             "pitchspeed": pkt.fields.get("pitchspeed"),
                             "yawspeed": pkt.fields.get("yawspeed"),
-                            "t": pkt.timestamp
+                            "t": pkt.timestamp,
                         }
                     )
+                    #print(f"[DEBUG] on_cmd: sending to transport={{pkt.device_id}} ATTITUDE published")
 
     def _heartbeat_loop(self):
         interval = float(self.cfg.get("mqtt",{}).get("heartbeat_secs", 2.0))
@@ -203,11 +203,8 @@ class Bridge:
         manifest = {
             "bridge_root": self.root,
             "topics": {
-                "device_cmd": f"{self.root}/devices/{{device_id}}/cmd/{{action}}",
-                "device_cmd_wildcard": f"{self.root}/devices/+/cmd/+",
-                "global_cmd": f"{self.root}/cmd/{{action}}",
-                "mission_upload": f"{self.root}/sysid_{{sysid}}/mission/upload",
-                "command_long": f"{self.root}/sysid_{{sysid}}/command/long",
+                "cmd": CMD_ROOT_TOPIC.format(root=self.root, action="{action}"),
+                "mission_upload": MISSION_UPLOAD_TOPIC.format(root=self.root),
                 "raw_mavlink": RAW_MAVLINK_TOPIC.format(root=self.root, device_id="{device_id}", msg="{msg}"),
                 "discovery": DISCOVERY_TOPIC.format(root=self.root, device_id="{device_id}"),
                 "heartbeat": HEARTBEAT_TOPIC.format(root=self.root, device_id="{device_id}")
