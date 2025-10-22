@@ -130,7 +130,6 @@ def send_command(conn, pkt: Packet):
             # Send each mission item as a MAVLink MISSION_ITEM_INT message
             for idx, item in enumerate(mission_items):
                 seq = idx
-                frame = item.get("frame", 3)  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
                 command = item.get("command", 16)  # MAV_CMD_NAV_WAYPOINT
                 current = 1 if idx == 0 else 0
                 autocontinue = item.get("autocontinue", 1)
@@ -139,15 +138,19 @@ def send_command(conn, pkt: Packet):
                 param2 = params[1] if len(params) > 1 else 0
                 param3 = params[2] if len(params) > 2 else 0
                 param4 = params[3] if len(params) > 3 else 0
-                # Accept both lat/lon/alt and x/y/z
-                if "lat" in item and "lon" in item and "alt" in item:
-                    x = int(item.get("lat", 0) * 1e7)
-                    y = int(item.get("lon", 0) * 1e7)
-                    z = int(item.get("alt", 0))
+                # Use correct coordinate set based on frame type
+                frame = item.get("frame")
+                if frame == 6 and all(k in item for k in ("lat", "lon", "alt")):
+                    x = int(item["lat"] * 1e7)
+                    y = int(item["lon"] * 1e7)
+                    z = float(item["alt"])
+                elif frame == 3 and all(k in item for k in ("x", "y", "z")):
+                    x = int(item["x"])
+                    y = int(item["y"])
+                    z = float(item["z"])
                 else:
-                    x = int(item.get("x", 0) * 1e7)
-                    y = int(item.get("y", 0) * 1e7)
-                    z = int(item.get("z", 0))
+                    print(f"[ERROR] Invalid or missing coordinates/frame in mission item: {item}")
+                    continue
                 conn.mav.mission_item_int_send(
                     target_sysid,
                     target_compid,
