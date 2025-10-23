@@ -5,6 +5,7 @@ import time
 import os
 import threading
 from topic_schema import choose_command_topic, format_topic
+from broker_config import load_common_mqtt_cfg
 # import helpers we factored out
 from helpers import (
     load_yaml, create_mqtt_client, fetch_manifest,
@@ -23,9 +24,8 @@ class Pathfinder:
         self.base_dir = os.path.dirname(__file__)
         self.config_path = config_path or os.path.join(self.base_dir, "pathfinder.config.yaml")
         self.cfg = self._load_config()
-        self.mqtt_cfg = self.cfg.get("mqtt", {
-            "host": "localhost", "port": 1883, "client_id": "pathfinder-controller", "topic_prefix": "wayfarer/v1", "qos": 0
-        })
+        # Build MQTT config from common broker standard + overrides from config
+        self.mqtt_cfg = load_common_mqtt_cfg(self.base_dir, self.cfg.get("mqtt"))
         self.topic_prefix = self.mqtt_cfg.get("topic_prefix", "wayfarer/v1")
         # Monitoring settings (optional in config under 'monitoring')
         mon = self.cfg.get("monitoring") if isinstance(self.cfg.get("monitoring"), dict) else {}

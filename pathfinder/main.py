@@ -15,18 +15,14 @@ import os
 import yaml
 from pathlib import Path
 from launch_missions import main as launch_main
+from broker_config import load_common_mqtt_cfg
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CFG = ROOT / "pathfinder.config.yaml"
 
-# Default MQTT settings embedded here (kept intentionally simple)
-DEFAULT_MQTT = {
-    "host": "localhost",
-    "port": 1883,
-    "client_id": "pathfinder-controller",
-    "topic_prefix": "wayfarer/v1",
-    "qos": 0,
-}
+# Default MQTT settings are resolved from Houston configs if present
+def compute_default_mqtt(base_dir):
+    return load_common_mqtt_cfg(base_dir, {})
 
 
 def load_yaml(path):
@@ -55,8 +51,8 @@ def cli():
         tmp_path = None
         use_path = None
         if "mqtt" not in cfg or not isinstance(cfg.get("mqtt"), dict):
-            # produce an in-memory effective config and write to a system temp file (do not write into the repo)
-            effective = {**cfg, "mqtt": DEFAULT_MQTT}
+            # produce an in-memory effective config using common defaults
+            effective = {**cfg, "mqtt": compute_default_mqtt(ROOT)}
             import tempfile
             fd, tmp = tempfile.mkstemp(prefix="pathfinder-effective-", suffix=".yaml")
             try:
