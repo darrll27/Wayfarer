@@ -1,0 +1,31 @@
+## Wayfarer -> Houston example config (standalone copy)
+## Matches Houston broker defaults in Houston/config/broker.config.json
+## - TCP MQTT: 1884
+## - HTTP/API: 4000
+## - WS MQTT: 9002 at /mqtt (for the web UI; Wayfarer uses TCP MQTT)
+version: 1
+bridge_id: "wayfarer-bridge-houston"
+
+mqtt:
+  host: "localhost"            # Houston broker host
+  port: 1884                    # Houston broker TCP port
+  client_id: "wayfarer-bridge-houston"
+  topic_prefix: "wayfarer/v1"  # Must match Houston UI topic prefix
+  qos: 0
+  retain_heartbeat: true
+  # username: ""               # Optional if you disable allow_anonymous in broker.config.json
+  # password: ""
+
+transports:
+  mavlink_udp_14551:
+    type: mavlink_udp
+    endpoint: "udpin:0.0.0.0:14551"
+  mavlink_usb_main:
+    type: mavlink_serial
+    endpoint: "serial:/dev/cu.usbmodem01:115200"
+
+routes:
+  - from: "mavlink_udp_*"
+    to:   "mqtt"
+  - from: "mqtt"
+    to:   "mavlink_udp_*"

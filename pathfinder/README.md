@@ -28,13 +28,19 @@ Manifest dependency (how Pathfinder chooses topics)
 - mission_api will fetch the manifest on startup, cache it to `.cache/wayfarer_manifest.json`, and use the manifest to format topics.
 - If a live manifest is fetched and differs from the cache, the cache is updated and a message is printed.
 
+Mission upload API (root‑level)
+- Topic: `{topic_prefix}/mission/upload` (root; not per‑sysid)
+- Payload: `{ sysid: <number>, mission_items: [ { lat, lon, alt, ... }, ... ] }`
+- Reasoning: Houston (the UI) subscribes once at the root to render overlays for all vehicles. Wayfarer consumes the root topic and routes per device.
+
 Behavior summary
 - On startup mission_api:
   - loads pathfinder.config.yaml
   - fetches and validates the Wayfarer manifest (abort if missing required patterns)
   - resolves waypoint file for each group (waypoints_folder + waypoint_type + <base>.yaml)
-  - uploads mission (publishes to manifest-provided mission_upload topic)
-  - issues takeoff/start commands using manifest-provided command topic patterns (device_cmd, command_long, or global_cmd) — no fallbacks unless a cached manifest exists
+  - uploads mission to the root mission topic (one publish per sysid in the group)
+  - issues preflight/arm/takeoff/start commands (per sysid), with a small stagger (~1s) between vehicles to avoid bursts
+  - continues publishing an aggregated state for UI convenience (group, sysid, checkpoint, lat/lon/alt, t)
 
 Running Pathfinder (example)
 - From the repo:
@@ -43,8 +49,19 @@ Running Pathfinder (example)
 
 Example logs you will see
 - "[alpha] bridge manifest fetched and cache updated at .../.cache/wayfarer_manifest.json"
-- "[alpha] mission_upload topic (from manifest): wayfarer/v1/sysid_1/mission/upload"
-- "[alpha] using device_cmd topic for takeoff: wayfarer/v1/devices/mav_sys1/cmd/takeoff"
+- "[alpha] mission_upload topic (root): wayfarer/v1/mission/upload"
+- "[alpha] using device_cmd for takeoff: wayfarer/v1/devices/mav_sys1/cmd/takeoff"
+
+Quickstart
+- Ensure Houston is running (broker + UI) on localhost (HTTP 4000, WS MQTT 9002/mqtt, TCP MQTT 1884)
+- Start Wayfarer
+- Run Pathfinder with your config:
+  - `python pathfinder/main.py -c pathfinder/pathfinder.config.yaml --run`
+  - Or: `python pathfinder/launch_missions.py`
+
+UI integration (Houston)
+- Houston auto‑renders overlays upon receiving the root mission uploads; it keeps a mission cache (~10 minutes) so overlays persist without inbound GPS.
+- Heartbeats (from Wayfarer device topics) drive the alive pulse; GPS and MISSION_CURRENT refine position and checkpoint highlighting.
 
 Troubleshooting
 - If mission_api aborts with "bridge manifest not found", ensure Wayfarer is running and publishing a retained manifest at {topic_prefix}/bridge/manifest.
@@ -54,4 +71,5 @@ Troubleshooting
 Notes / Recommendations
 - Wayfarer and Pathfinder are separate APIs. Keep Wayfarer responsible for bridge/transport concerns and publishing the canonical manifest. Pathfinder should not hardcode topics — it should use the manifest.
 - If you want tolerant fallback behavior, run Wayfarer first so Pathfinder caches the manifest before missions are started.
+- Prefer absolute missions (lat/lon/alt) if you want overlays in the UI; relative paths can be supported via a configured origin transform.
 

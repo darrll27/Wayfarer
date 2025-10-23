@@ -1,0 +1,20 @@
+{
+  "name": "houston-server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node src/index.js",
+    "build": "echo 'no build step for server'",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "aedes": "^0.51.3",
+    "body-parser": "^1.20.3",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "pump": "^3.0.0",
+    "websocket-stream": "^5.5.2",
+    "ws": "^8.18.0"
+  }
+}

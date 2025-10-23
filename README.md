@@ -1,77 +1,100 @@
-# wayfarer
-MQTT universal bridge to hardware
+# Wayfarer — MQTT bridge, Pathfinder mission controller, and Houston dashboard
 
-# Wayfarer
+This repo contains three pieces that work together:
 
-**Wayfarer** is a lightweight, discovery-driven hardware bridge for software telemetry.
-- MAVLink ⇄ MQTT (two-way)
-- Device-first (no per-device config; auto discovery)
-- Topic model with `telem/` and `cmd/` separation
-- Minimal dependencies
+- Wayfarer: Lightweight discovery‑driven MAVLink⇄MQTT bridge (Python)
+- Pathfinder: Mission controller that uploads missions and issues commands via MQTT (Python)
+- Houston: Web telemetry dashboard with a built‑in MQTT broker (Node/React)
 
-## Quickstart
+Highlights
+- Device‑first topics (auto‑discovery; no per‑device config)
+- Clean topic model: `telem/` for telemetry, `cmd/` for commands
+- Canonical mission upload API at the root: `{topic_prefix}/mission/upload`
+- Map overlays in Houston: mission paths, current checkpoint, labels (group · sysid), and a sysid picker with a mission debug panel
+
+## Quick start
+
+1) Start Houston (broker + UI)
+
+```bash
+cd Houston
+npm install
+npm run build
+npm run start    # HTTP:4000, WS MQTT:9002/mqtt, TCP MQTT:1884
+```
+
+Open http://localhost:4000
+
+2) Start Wayfarer (bridge)
 
 ```bash
 pip install -e .
-wayfarer --config examples/config.min.yaml
-
-
-# Filetree
-```
-wayfarer/
-├─ pyproject.toml
-├─ README.md
-├─ LICENSE
-├─ examples/
-│  └─ config.min.yaml
-└─ wayfarer/
-    ├─ __init__.py
-    ├─ cli/
-    │  └─ main.py
-    ├─ core/
-    │  ├─ bridge.py
-    │  ├─ registry.py
-    │  ├─ packet.py
-    │  ├─ router.py
-    │  ├─ constants.py
-    │  └─ metrics.py
-    ├─ config/
-    │  └─ loader.py
-    ├─ transports/
-    │  ├─ base.py
-    │  └─ mavlink_udp.py
-    └─ routers/
-        ├─ base.py
-        └─ mqtt_router.py
+wayfarer -c examples/wayfarer.config.houston.yaml
 ```
 
-## Pathfinder (mission launcher)
-
-The repository includes a small mission launcher under the `pathfinder/` folder. This is a lightweight CLI that loads a `pathfinder` YAML config, injects sensible MQTT defaults when the config doesn't include an `mqtt:` section, and then launches group missions.
-
-Usage examples
-
-- Print the effective config (merged with defaults):
+3) Launch Pathfinder (mission controller)
 
 ```bash
-python pathfinder/main.py -c pathfinder/pathfinder.config_single.yaml
+python pathfinder/main.py -c pathfinder/pathfinder.config.yaml --run
 ```
 
-- Run missions immediately (explicit run flag):
+## Topics (minimal)
 
-```bash
-python pathfinder/main.py -c pathfinder/pathfinder.config_single.yaml --run
-```
+- Mission upload (root, required for overlays)
+    - Topic: `{prefix}/mission/upload`
+    - Payload: `{ sysid: <number>, mission_items: [ { lat, lon, alt, ... }, ... ] }`
 
-- Run using the default `pathfinder/pathfinder.config.yaml` (no args):
+- Heartbeat (alive)
+    - Topic: `{prefix}/devices/mav_sys<sysid>/telem/state/heartbeat`
+    - Payload: `{}`
 
-```bash
-python pathfinder/main.py
-```
+- GPS (any of):
+    - `{prefix}/devices/mav_sys<sysid>/telem/raw/mavlink/GLOBAL_POSITION_INT`
+    - `{prefix}/devices/mav_sys<sysid>/telem/raw/mavlink/GPS_RAW_INT`
+    - `{prefix}/devices/mav_sys<sysid>/telem/raw/mavlink/GPS2_RAW`
 
-Notes
-- If you pass `-c <file>` the CLI will print the effective config (merged with in-memory defaults) unless you also pass `--run`. This was intentional to make it simple to inspect the merged configuration before launching.
-- When a config is missing an `mqtt:` block, `main.py` injects defaults (host: `localhost`, port: `1883`, topic_prefix: `wayfarer/v1`, `client_id: pathfinder-controller`, `qos: 0`). In some versions `main.py` writes a local `pathfinder/.effective_pathfinder.yaml` file; it is safe to remove and can be added to `.gitignore` if you don't want it in the working tree.
-- `launch_missions.py` launches one process per configured group and reads the given config file path. If you need customized behavior (in-memory merging or temporary overrides) those are handled by `main.py` before delegating to `launch_missions.main()`.
+- Current checkpoint (optional)
+    - `{prefix}/devices/mav_sys<sysid>/telem/raw/mavlink/MISSION_CURRENT`
+    - `{ seq: <number> }`
 
-If you want, I can (a) change `main.py` so `-c` implies `--run`, (b) stop writing `.effective_pathfinder.yaml` and use a system temp file instead, or (c) add a short troubleshooting section showing common errors (manifest missing, MQTT connect issues). Tell me which you prefer and I'll apply it.
+- Aggregated Pathfinder state (optional visual aid)
+    - `{prefix}/pathfinder/sysid_<sysid>/state`
+    - `{ group, sysid, checkpoint, lat, lon, alt, t }`
+
+## Simulate telemetry quickly
+
+Publish these while Houston is open to see a localized, alive drone with overlays:
+
+- Mission upload
+    - Topic: `wayfarer/v1/mission/upload`
+    - Payload:
+        ```json
+        { "sysid": 6, "mission_items": [
+            { "lat": 37.412545, "lon": -121.998,   "alt": 52 },
+            { "lat": 37.413045, "lon": -121.9982, "alt": 57 },
+            { "lat": 37.413545, "lon": -121.9984, "alt": 61 },
+            { "lat": 37.414045, "lon": -121.9986, "alt": 54 }
+        ]}
+        ```
+
+- Heartbeat
+    - Topic: `wayfarer/v1/devices/mav_sys6/telem/state/heartbeat`
+    - Payload: `{}`
+
+- GPS
+    - Topic: `wayfarer/v1/devices/mav_sys6/telem/raw/mavlink/GLOBAL_POSITION_INT`
+    - Payload: `{ "lat": 37.4219999, "lon": -122.0840575, "alt": 32.1 }`
+
+- Current checkpoint (optional)
+    - Topic: `wayfarer/v1/devices/mav_sys6/telem/raw/mavlink/MISSION_CURRENT`
+    - Payload: `{ "seq": 0 }`
+
+## Component docs
+
+- Houston: `houston/README.md` — broker ports, pages, and UI details (Map overlays, sysid picker, debug panel)
+- Wayfarer: `wayfarer/README.md` — bridge topics and config
+- Pathfinder: `pathfinder/README.md` — groups, waypoints, mission upload behavior
+
+## Notes
+- Mission uploads are not retained by default; keep Houston open to cache overlays (Houston keeps mission cache for 10 minutes).
+- Overlays require absolute waypoints (lat/lon). Relative‑only missions won’t draw yet; can be enabled with an origin transform.
