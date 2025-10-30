@@ -20,6 +20,18 @@ groups:
     stagger_secs: 2.0
     #waypoint_type: "relative"
 
+# pre-upload sequence run before mission items are uploaded to vehicle(s)
+pre_upload:
+  - command: 45    # MAV_CMD_MISSION_CLEAR_ALL -> clear all mission items
+    params: [0,0,0,0,0,0,0]
+    action: "clear_mission"
+    delay: 0.2
+
+  - command: 176   # MAV_CMD_REQUEST_MESSAGE (example: request heartbeat/status)
+    params: [0,0,0,0,0,0,0]
+    action: "pre_upload"
+    delay: 0.2
+
 # common preflight sequence applied when no group-specific preflight_file is present
 preflight:
   - command: 176   # MAV_CMD_REQUEST_MESSAGE (example: request heartbeat/status)

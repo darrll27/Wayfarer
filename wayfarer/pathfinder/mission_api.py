@@ -192,6 +192,39 @@ class Pathfinder:
 
         waypoints = [to_mission_item(idx, item) for idx, item in enumerate(raw_waypoints)]
 
+        # --- Optional pre-upload sequence (run before mission items are uploaded) ---
+        # Allow group-specific `pre_upload` or fall back to top-level `pre_upload` in main config
+        pre_upload = []
+        if isinstance(group.get('pre_upload'), list) and group.get('pre_upload'):
+            pre_upload = group.get('pre_upload')
+        else:
+            cfg_pu = self.cfg.get('pre_upload')
+            if isinstance(cfg_pu, list) and cfg_pu:
+                pre_upload = cfg_pu
+
+        # Normalize sysid list for per-sysid command publication
+        pu_sysids = group.get('sysids') or []
+        if not isinstance(pu_sysids, list):
+            pu_sysids = [pu_sysids]
+
+        if pre_upload:
+            print(f"[{group_name}] executing pre_upload ({len(pre_upload)} items) before mission upload")
+            for sid in pu_sysids:
+                device_id = f"mav_sys{sid}"
+                for item in pre_upload:
+                    cmd = item.get("command")
+                    params = item.get("params", [0] * 7)
+                    cmd_topic, chosen_key = publish_mav_command(
+                        client, manifest, sid, device_id, cmd, params=params,
+                        action=item.get("action", "pre_upload"), qos=self.mqtt_cfg.get("qos", 0),
+                        tracker=tracker, topic_prefix=self.topic_prefix
+                    )
+                    if not cmd_topic:
+                        print(f"[{group_name}-{sid}] ERROR: no command topic resolved for pre_upload command -> {cmd}")
+                    else:
+                        print(f"[{group_name}-{sid}] Sent pre_upload cmd -> [{chosen_key}] {cmd_topic}")
+                    time.sleep(item.get("delay", 0.5))
+
         # --- Mission upload to all sysids ---
         self._send_mission_upload_to_all(client, manifest, group_name, group, waypoints, compid)
 
