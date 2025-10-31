@@ -7,6 +7,8 @@ import cors from 'cors';
 import bodyParser from 'body-parser';
 import aedesFactory from 'aedes';
 import { WebSocketServer, createWebSocketStream } from 'ws';
+// video routes moved to separate module
+import registerVideoRoutes from './videoServer.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -42,6 +44,9 @@ const brokerCfg = readJSON(brokerConfigPath, {
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(bodyParser.json({ limit: '2mb' }));
+
+// Register video acquisition routes (separated to avoid mixing with broker logic)
+registerVideoRoutes(app, houstonConfigPath, readJSON);
 
 // In-memory status
 const aedesOptions = {};
@@ -116,6 +121,8 @@ app.get('/api/broker', (req, res) => {
     }
   });
 });
+
+// video routes are implemented in src/videoServer.js
 
 // Serve built UI if present
 if (fs.existsSync(WEB_DIST)) {

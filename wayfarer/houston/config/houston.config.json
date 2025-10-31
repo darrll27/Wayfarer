@@ -1,5 +1,12 @@
 {
   "topic_prefix": "wayfarer/v1",
+  "video": {
+    "host": "127.0.0.1",
+    "base_port": 5600,
+    "codec": "h264",
+    "spawn_on_start": true,
+    "disable_rtcp": true
+  },
   "groups": [
     {
       "id": "alpha",
