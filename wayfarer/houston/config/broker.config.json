@@ -1,7 +1,7 @@
 {
   "http_port": 4000,
-  "tcp_port": 1884,
-  "ws_port": 9002,
+  "tcp_port": 1883,
+  "ws_port": 9102,
   "ws_path": "/mqtt",
   "allow_anonymous": true,
   "users": []

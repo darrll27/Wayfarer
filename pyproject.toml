@@ -9,7 +9,8 @@ authors = [{name="Your Team"}]
 dependencies = [
   "pymavlink>=2.4",
   "paho-mqtt>=2.0",
-  "PyYAML>=6.0"
+  "PyYAML>=6.0",
+  "numpy"
 ]
 
 [project.scripts]

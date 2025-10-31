@@ -123,7 +123,7 @@ export default function MapView() {
     // Center on selected sysid, else auto-fit to all overlays once
     if (selected && telemetry.get(selected) && typeof telemetry.get(selected).lat === 'number') {
       const e = telemetry.get(selected)
-      map.setView([e.lat, e.lon], 14)
+      map.setView([e.lat, e.lon], 18)
     } else if (!hasFittedRef.current && allLatlngs.length > 0) {
       try {
         map.fitBounds(L.latLngBounds(allLatlngs), { padding: [24, 24] })
@@ -171,7 +171,7 @@ export default function MapView() {
             } else {
               const e = telemetry.get(String(selected))
               if (e && typeof e.lat === 'number' && typeof e.lon === 'number') {
-                try { map.setView([e.lat, e.lon], 14) } catch {}
+                try { map.setView([e.lat, e.lon], 18) } catch {}
               }
             }
           }}>Fit</button>

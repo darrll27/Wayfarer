@@ -87,3 +87,4 @@ Thumbs.db
 # Project-specific
 wayfarer.egg-info/
 node_modules
+.wayfarer_venv/
