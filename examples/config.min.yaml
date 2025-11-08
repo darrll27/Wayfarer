@@ -1,6 +1,10 @@
 version: 1
 bridge_id: "wayfarer-bridge-01"
 
+gcs:
+  enabled: true  # set false to disable virtual GCS emitter
+  sysid: 254     # device_id automatically becomes mav_sys{sysid};
+
 mqtt:
   host: "localhost"
   port: 1883
@@ -10,12 +14,26 @@ mqtt:
   retain_heartbeat: true
 
 transports:
+  mavlink_udp_14445:
+    type: mavlink_udp
+    endpoint: "udpin:0.0.0.0:14445"
+  mavlink_udp_14550:
+    type: mavlink_udp
+    endpoint: "udpin:0.0.0.0:14550"
   mavlink_udp_14551:
     type: mavlink_udp
-    endpoint: "udp:0.0.0.0:14551"
+    endpoint: "udpin:0.0.0.0:14551"
+  mavlink_usb_main:
+    type: mavlink_serial
+    endpoint: "serial:/dev/cu.usbmodem01:115200"
 
 routes:
   - from: "mavlink_udp_*"   # wildcard: all mavlink UDP inputs
     to:   "mqtt"            # publish telem to MQTT
   - from: "mqtt"
     to:   "mavlink_udp_*"   # route commands from MQTT to all mavlink UDP outputs
+  - from: "mavlink_usb_*"   # wildcard: all mavlink UDP inputs
+    to:   "mqtt"            # publish telem to MQTT
+  - from: "mqtt"
+    to:   "mavlink_usb_*"   # route commands from MQTT to all mavlink UDP outputs
+

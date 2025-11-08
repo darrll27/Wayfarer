@@ -10,7 +10,8 @@ dependencies = [
   "pymavlink>=2.4",
   "paho-mqtt>=2.0",
   "PyYAML>=6.0",
-  "numpy"
+  "numpy",
+  "pyserial"
 ]
 
 [project.scripts]

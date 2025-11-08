@@ -57,10 +57,12 @@ def _resolve_mav_cmd_id(cmd: object) -> int:
 def send_command(conn, pkt: Packet):
     """Map a normalized Packet to pymavlink send calls via `conn`.
 
-    Supports:
-      - COMMAND_LONG
-      - SET_MODE
-      - MISSION_UPLOAD
+        Supports:
+            - COMMAND_LONG
+            - SET_MODE
+            - MISSION_UPLOAD
+            - HEARTBEAT
+            - REQUEST_DATA_STREAM
     """
     msg_type = pkt.msg_type
     try:
@@ -103,6 +105,85 @@ def send_command(conn, pkt: Packet):
                 pkt.fields.get("base_mode", 209),
                 pkt.fields.get("custom_mode", 4),
             )
+        elif msg_type == "HEARTBEAT":
+            # Determine temporary source identity for on-wire send.
+            # Prefer explicit fields if present, otherwise derive from pkt.device_id
+            orig_sys = getattr(conn, "source_system", None)
+            orig_comp = getattr(conn, "source_component", None)
+            src_sys = pkt.fields.get("src_sysid")
+            src_comp = pkt.fields.get("src_compid")
+            # Derive from device_id like 'mav_sys3' when explicit src not provided
+            if src_sys is None and getattr(pkt, "device_id", None):
+                try:
+                    if isinstance(pkt.device_id, str) and pkt.device_id.startswith("mav_sys"):
+                        src_sys = int(pkt.device_id.split("mav_sys", 1)[1])
+                except Exception:
+                    src_sys = None
+            # Fallback compid from generic 'compid' field or default to 1
+            if src_comp is None:
+                src_comp = pkt.fields.get("compid", 1)
+            try:
+                if src_sys is not None:
+                    conn.source_system = int(src_sys)
+                if src_comp is not None:
+                    conn.source_component = int(src_comp)
+            except Exception:
+                pass
+            try:
+                conn.mav.heartbeat_send(
+                    int(pkt.fields.get("type", getattr(mavutil.mavlink, "MAV_TYPE_GCS", 6))),
+                    int(pkt.fields.get("autopilot", getattr(mavutil.mavlink, "MAV_AUTOPILOT_INVALID", 8))),
+                    int(pkt.fields.get("base_mode", 192)),
+                    int(pkt.fields.get("custom_mode", 0)),
+                    int(pkt.fields.get("system_status", 4)),
+                )
+            finally:
+                # Restore original identity to avoid global mutation
+                try:
+                    if orig_sys is not None:
+                        conn.source_system = orig_sys
+                    if orig_comp is not None:
+                        conn.source_component = orig_comp
+                except Exception:
+                    pass
+        elif msg_type == "REQUEST_DATA_STREAM":
+            # Determine temporary source identity for on-wire request.
+            orig_sys = getattr(conn, "source_system", None)
+            orig_comp = getattr(conn, "source_component", None)
+            src_sys = pkt.fields.get("src_sysid")
+            src_comp = pkt.fields.get("src_compid")
+            # Derive from device_id like 'mav_sys3' when explicit src not provided
+            if src_sys is None and getattr(pkt, "device_id", None):
+                try:
+                    if isinstance(pkt.device_id, str) and pkt.device_id.startswith("mav_sys"):
+                        src_sys = int(pkt.device_id.split("mav_sys", 1)[1])
+                except Exception:
+                    src_sys = None
+            if src_comp is None:
+                src_comp = pkt.fields.get("compid", 1)
+            try:
+                if src_sys is not None:
+                    conn.source_system = int(src_sys)
+                if src_comp is not None:
+                    conn.source_component = int(src_comp)
+            except Exception:
+                pass
+            try:
+                conn.mav.request_data_stream_send(
+                    int(pkt.fields.get("target_system", 0)),
+                    int(pkt.fields.get("target_component", 0)),
+                    int(pkt.fields.get("req_stream_id", getattr(mavutil.mavlink, "MAV_DATA_STREAM_ALL", 0))),
+                    int(pkt.fields.get("req_message_rate", 10)),
+                    int(pkt.fields.get("start_stop", 1)),
+                )
+            finally:
+                try:
+                    if orig_sys is not None:
+                        conn.source_system = orig_sys
+                    if orig_comp is not None:
+                        conn.source_component = orig_comp
+                except Exception:
+                    pass
         elif msg_type == "MISSION_UPLOAD":
             # Handle mission upload: expects 'mission_items' in fields
             mission_items = pkt.fields.get("mission_items")
@@ -178,7 +259,13 @@ def send_command(conn, pkt: Packet):
 
 
 # Export supported message types for discovery/manifest
-SUPPORTED_MSG_TYPES = ["COMMAND_LONG", "SET_MODE"]
+SUPPORTED_MSG_TYPES = [
+    "COMMAND_LONG",
+    "SET_MODE",
+    "MISSION_UPLOAD",
+    "HEARTBEAT",
+    "REQUEST_DATA_STREAM",
+]
 
 
 def get_supported_msg_types():

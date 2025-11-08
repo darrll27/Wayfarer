@@ -1,86 +1,35 @@
-import time, threading, queue
+import time, threading, queue, logging
 from typing import Optional
 from pymavlink import mavutil
 from wayfarer.core.packet import Packet
 from wayfarer.core.command_mapper import send_command
+from .mavlink_general import MavlinkGeneral
 
 
-class MavlinkSerial:
-    """
-    MAVLink transport over USB or serial ports.
-
-    Example endpoint:
-        endpoint: "serial:/dev/ttyUSB0:115200"
-    """
+class MavlinkSerial(MavlinkGeneral):
+    """Serial-specific subclass using the generic MAVLink base transport."""
 
     def __init__(self, name: str, endpoint: str, on_discover, on_packet):
-        self.name = name
-        self.endpoint = endpoint
-        self.on_discover = on_discover
-        self.on_packet = on_packet
-        self._conn = None
-        self._txq = queue.Queue(maxsize=512)
-        self._run = False
+        super().__init__(name, endpoint, on_discover, on_packet)
+        self._port = None
+        self._baud = None
 
-    def start(self):
-        # Expect endpoint like "serial:/dev/ttyUSB0:115200"
+    # inherit set_source_identity from base
+
+    def _open_connection(self):
+        # Parse endpoint like serial:/dev/ttyUSB0:115200
         parts = self.endpoint.split(":")
-        if len(parts) >= 3:
-            port, baud = parts[1], int(parts[2])
-        else:
+        if len(parts) < 3:
             raise ValueError(f"Invalid serial endpoint: {self.endpoint}")
+        self._port, self._baud = parts[1], int(parts[2])
+        return mavutil.mavlink_connection(self._port, baud=self._baud)
 
-        self._conn = mavutil.mavlink_connection(port, baud=baud)
-        self._run = True
-        threading.Thread(target=self._rx_loop, daemon=True).start()
-        threading.Thread(target=self._tx_loop, daemon=True).start()
+    # stop inherited
 
-    def stop(self):
-        self._run = False
-        try:
-            if self._conn:
-                self._conn.close()
-        except Exception:
-            pass
+    # connect loop inherited
 
-    def _rx_loop(self):
-        while self._run:
-            try:
-                msg = self._conn.recv_match(blocking=True, timeout=0.2)
-                if not msg:
-                    continue
-                sysid = getattr(msg, "get_srcSystem", lambda: None)() or self._conn.target_system or 0
-                compid = getattr(msg, "get_srcComponent", lambda: None)() or self._conn.target_component or 0
-                device_id = self.on_discover(sysid, self.name)
-                pkt = Packet(
-                    device_id=device_id,
-                    schema="mavlink",
-                    msg_type=msg.get_type(),
-                    fields=msg.to_dict(),
-                    timestamp=time.time(),
-                    origin=self.name,
-                )
-                self.on_packet(pkt)
-            except Exception:
-                pass
+    # rx loop inherited
 
-    def _tx_loop(self):
-        while self._run:
-            try:
-                pkt = self._txq.get(timeout=0.2)
-                raw = pkt.fields.get("raw")
-                if raw and isinstance(raw, (bytes, bytearray)):
-                    self._conn.write(raw)
-                    continue
-                # Fallback to structured command mapping
-                send_command(self._conn, pkt)
-            except queue.Empty:
-                continue
-            except Exception:
-                pass
+    # tx loop inherited
 
-    def write(self, pkt: Packet):
-        try:
-            self._txq.put_nowait(pkt)
-        except Exception:
-            pass
+    # write inherited

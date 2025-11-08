@@ -43,6 +43,8 @@ cleanup() {
     if kill -0 "$WAYFARER_PID" 2>/dev/null; then
       kill -9 "$WAYFARER_PID" 2>/dev/null || true
     fi
+    # If a child process of the backgrounded shell survived, try to kill by name as a last resort
+    pkill -f "wayfarer" 2>/dev/null || true
   fi
 
   echo "Done. Logs are in $LOG_DIR"
@@ -56,6 +58,8 @@ start_houston() {
     echo "Starting Houston (npm start) in $HOUSTON_DIR"
     pushd "$HOUSTON_DIR" >/dev/null || return
     # run npm in background and capture pid
+    npm install
+    npm run build
     npm start > "$LOG_DIR/houston.log" 2>&1 &
     HOUSTON_PID=$!
     popd >/dev/null || return
@@ -69,12 +73,14 @@ start_houston() {
 start_wayfarer() {
   if [ -f "$VENV/bin/activate" ]; then
     echo "Starting wayfarer inside venv $VENV with config $WAYFARER_CONFIG"
-    bash -lc "source \"$VENV/bin/activate\" && wayfarer -c \"$WAYFARER_CONFIG\"" > "$LOG_DIR/wayfarer.log" 2>&1 &
+    # use exec to replace the shell so $! refers to the actual wayfarer process
+    bash -lc "source \"$VENV/bin/activate\" && exec wayfarer -c \"$WAYFARER_CONFIG\"" > "$LOG_DIR/wayfarer.log" 2>&1 &
     WAYFARER_PID=$!
     echo "Wayfarer started (pid $WAYFARER_PID). Logs: $LOG_DIR/wayfarer.log"
   else
     echo "Virtualenv not found at $VENV. Trying to run system 'wayfarer' if available."
-    wayfarer -c "$WAYFARER_CONFIG" > "$LOG_DIR/wayfarer.log" 2>&1 &
+    # Use exec in subshell to ensure PID maps to the actual process
+    bash -lc "exec wayfarer -c \"$WAYFARER_CONFIG\"" > "$LOG_DIR/wayfarer.log" 2>&1 &
     WAYFARER_PID=$!
     echo "Wayfarer started (pid $WAYFARER_PID). Logs: $LOG_DIR/wayfarer.log"
   fi

@@ -1,4 +1,5 @@
 import json, time, threading
+from pymavlink import mavutil
 from queue import Queue
 from wayfarer.core.registry import DeviceRegistry
 from wayfarer.core.constants import (
@@ -18,8 +19,33 @@ class Bridge:
         self.transports = transports
         self.mqtt = mqtt_router
         self.root = cfg["mqtt"].get("topic_prefix", TOPIC_VERSION)
+        # Inbound telemetry/events queue (from transports -> MQTT)
         self.q = Queue(maxsize=10000)
+        # Outbound command queue (from producers like GCS -> transports)
+        self.q_out = Queue(maxsize=10000)
         self._run = False
+        # threads created by start(); stored so we can join on stop()
+        self._threads = []
+        # High-level GCS behavior (optional configuration)
+        gcs_raw = cfg.get("gcs")
+        gcs_cfg = gcs_raw if isinstance(gcs_raw, dict) else {}
+        # Keep default enabled unless explicitly disabled in config
+        self.gcs_enabled = bool(gcs_cfg.get("enabled", True))
+        self.gcs_heartbeat_interval = float(gcs_cfg.get("heartbeat_interval", 1.0))
+        self.gcs_request_rate = int(gcs_cfg.get("request_rate", 10))
+        self.gcs_sysid = gcs_cfg.get("sysid")
+        self.gcs_compid = gcs_cfg.get("compid")
+        # Derive MQTT device_id for GCS publications immediately.
+        # No fallbacks: if sysid not provided, we disable the GCS loop.
+        try:
+            if self.gcs_sysid is not None:
+                self.gcs_device_id = f"mav_sys{int(self.gcs_sysid)}"
+            else:
+                self.gcs_device_id = None
+                self.gcs_enabled = False
+        except Exception:
+            self.gcs_device_id = None
+            self.gcs_enabled = False
 
     # --- lifecycle ---
     def start(self):
@@ -49,15 +75,43 @@ class Bridge:
         # start transports
         for t in self.transports.values():
             t.start()
-        # workers
-        threading.Thread(target=self._proc_loop, daemon=True).start()
-        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+        # workers (store thread references so we can join on stop)
+        t = threading.Thread(target=self._proc_loop, daemon=False)
+        t.start()
+        self._threads.append(t)
+        t = threading.Thread(target=self._heartbeat_loop, daemon=False)
+        t.start()
+        self._threads.append(t)
+        t = threading.Thread(target=self._route_loop, daemon=False)
+        t.start()
+        self._threads.append(t)
+        if self.gcs_enabled:
+            t = threading.Thread(target=self._gcs_loop, daemon=False)
+            t.start()
+            self._threads.append(t)
 
     def stop(self):
         self._run = False
         for t in self.transports.values():
             t.stop()
         self.mqtt.stop()
+        # Unblock queue.get() calls by pushing sentinel values where appropriate.
+        try:
+            # best effort - ignore if full
+            self.q.put_nowait(None)
+        except Exception:
+            pass
+        try:
+            self.q_out.put_nowait(None)
+        except Exception:
+            pass
+
+        # Join worker threads with a short timeout each
+        for thr in getattr(self, "_threads", []):
+            try:
+                thr.join(timeout=2.0)
+            except Exception:
+                pass
 
     # --- called by transports ---
     def on_discover_mav(self, sysid: int, origin_name: str) -> str:
@@ -89,9 +143,9 @@ class Bridge:
 
     # --- MQTT -> transports (commands) ---
     def on_cmd(self, topic: str, data: bytes):
-        # Support both:
+        # Support both topic forms, but always enqueue to route loop (no direct writes):
         #  - per-device: {root}/devices/<device_id>/cmd/<action>
-        #  - global:     {root}/cmd/<action>  (payload must include "device_id" or "sysid")
+        #  - global:     {root}/cmd/<action> (payload may include device_id/sysid)
         try:
             payload = json.loads(data.decode("utf-8"))
         except Exception:
@@ -99,8 +153,6 @@ class Bridge:
 
         parts = topic.split("/")
         device_id = None
-
-        # Attempt to extract device_id from /devices/<id>/...
         if "devices" in parts:
             try:
                 idx = parts.index("devices")
@@ -108,7 +160,6 @@ class Bridge:
             except Exception:
                 device_id = None
         else:
-            # Global cmd topic: rely on payload
             device_id = payload.get("device_id")
             if not device_id and "sysid" in payload:
                 try:
@@ -116,41 +167,27 @@ class Bridge:
                 except Exception:
                     device_id = None
 
-        # Determine transports to send to.
-        # If we have an explicit device_id but no transports are known for it,
-        # don't broadcast to all transports (that can cause commands to go to
-        # a default sysid on a serial/udp transport). Instead warn and skip.
-        if device_id:
-            target_transports = self.registry.transports_for(device_id)
-            if not target_transports:
-                print(f"[WARN] No transports known for device_id={device_id}; skipping command until device is discovered")
-                return
-        else:
-            # No device_id known -> broadcast to all transports
-            target_transports = set(self.transports.keys())
-
-        # If topic looks like a mission upload endpoint, prefer a well-known msg_type
-            print(f"[DEBUG] on_cmd: topic={topic} device_id={device_id} is_mission_upload={is_mission_upload} payload={payload}")
         is_mission_upload = topic.endswith('/mission/upload') or '/mission/upload' in topic
-
-        for tname in target_transports:
-            t = self.transports.get(tname)
-            if not t:
-                continue
-            pkt = Packet(
-                device_id=device_id,
-                schema=payload.get("schema", "mavlink"),
-                msg_type=("MISSION_UPLOAD" if is_mission_upload else payload.get("msg_type", "raw")),
-                fields=payload,
-                timestamp=time.time(),
-                origin="mqtt"
-            )
-            t.write(pkt)
+        pkt = Packet(
+            device_id=device_id,
+            schema=payload.get("schema", "mavlink"),
+            msg_type=("MISSION_UPLOAD" if is_mission_upload else payload.get("msg_type", "raw")),
+            fields=payload,
+            timestamp=time.time(),
+            origin="mqtt"
+        )
+        try:
+            self.q_out.put_nowait(pkt)
+        except Exception:
+            pass
 
     # --- internal workers ---
     def _proc_loop(self):
         while self._run:
             pkt = self.q.get()
+            # None is a shutdown sentinel pushed by stop()
+            if pkt is None:
+                break
             if pkt.schema == "mavlink":
                 # publish raw
                 topic = RAW_MAVLINK_TOPIC.format(
@@ -188,6 +225,86 @@ class Bridge:
                 pass
             time.sleep(interval)
 
+    def _route_loop(self):
+        """Route outbound Packets from producers (e.g., GCS) to transports based on routes table.
+        No implicit broadcast: if no route matches the packet.origin, we log and drop.
+        """
+        while self._run:
+            pkt = self.q_out.get()
+            # None is our shutdown sentinel
+            if pkt is None:
+                break
+            try:
+                outs = self.routes.outputs_for(pkt.origin)
+                if not outs:
+                    print(f"[WARN] No route outputs for origin={pkt.origin}; dropping msg_type={pkt.msg_type}")
+                    continue
+                for pat in outs:
+                    # pattern may be specific transport name or wildcard
+                    for name, t in self.transports.items():
+                        try:
+                            import fnmatch
+                            if fnmatch.fnmatch(name, pat):
+                                t.write(pkt)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+    def _gcs_loop(self):
+        """Continuously emit GCS HEARTBEAT + REQUEST_DATA_STREAM via all transports.
+        Uses optional cfg['gcs'] for interval, rate, and transport source identity.
+        """
+        while self._run and self.gcs_enabled:
+            try:
+                # Build GCS-style heartbeat matching common GCS values
+                hb_fields = {
+                    "mavpackettype": "HEARTBEAT",
+                    "type": int(getattr(mavutil.mavlink, "MAV_TYPE_GCS", 6)),
+                    "autopilot": int(getattr(mavutil.mavlink, "MAV_AUTOPILOT_INVALID", 8)),
+                    "base_mode": 192,
+                    "custom_mode": 0,
+                    "system_status": 4,
+                    "mavlink_version": 3,
+                }
+                # Enqueue outbound to route loop (no direct writes)
+                try:
+                    hb_pkt = Packet(device_id=self.gcs_device_id, schema="mavlink", msg_type="HEARTBEAT", fields=hb_fields, timestamp=time.time(), origin="mavlink_gcs")
+                    self.q_out.put_nowait(hb_pkt)
+                except Exception:
+                    pass
+                try:
+                    rds_fields = {
+                        "target_system": 0,
+                        "target_component": 0,
+                        "req_stream_id": int(getattr(mavutil.mavlink, "MAV_DATA_STREAM_ALL", 0)),
+                        "req_message_rate": int(self.gcs_request_rate),
+                        "start_stop": 1,
+                    }
+                    rds_pkt = Packet(device_id=self.gcs_device_id, schema="mavlink", msg_type="REQUEST_DATA_STREAM", fields=rds_fields, timestamp=time.time(), origin="mavlink_gcs")
+                    self.q_out.put_nowait(rds_pkt)
+                except Exception:
+                    pass
+                # Also enqueue both to inbound -> MQTT raw publish for observability
+                try:
+                    self.q.put_nowait(hb_pkt)
+                except Exception:
+                    pass
+                try:
+                    self.q.put_nowait(rds_pkt)
+                except Exception:
+                    pass
+                # Publish GCS heartbeat topic explicitly (virtual emitter not in registry)
+                try:
+                    if self.gcs_device_id:
+                        topic = HEARTBEAT_TOPIC.format(root=self.root, device_id=self.gcs_device_id)
+                        self.mqtt.publish_telem(topic, {"status": "online", "ts": time.time()}, retain=True)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            time.sleep(self.gcs_heartbeat_interval)
+
     def publish_manifest(self):
         """
         Publish an observable, retained manifest describing:
@@ -211,6 +328,14 @@ class Bridge:
             },
             "transports": list(self.transports.keys()),
             "routes": self.cfg.get("routes", []),
+            "gcs": {
+                "enabled": self.gcs_enabled,
+                "heartbeat_interval": self.gcs_heartbeat_interval,
+                "request_rate": self.gcs_request_rate,
+                "sysid": self.gcs_sysid,
+                "compid": self.gcs_compid,
+                "device_id": self.gcs_device_id,
+            },
             "devices": self.registry.snapshot(),
             "mapper": {
                 "supported_msg_types": command_mapper.get_supported_msg_types(),
@@ -247,7 +372,11 @@ class Bridge:
         (e.g., different install layouts).
         """
         try:
-            from wayfarer.core.publisher import publish_for_wayfarer
+            import importlib
+            mod = importlib.import_module("wayfarer.core.publisher")
+            publish_for_wayfarer = getattr(mod, "publish_for_wayfarer", None)
+            if publish_for_wayfarer is None:
+                return False
         except Exception:
             return False
         try:
