@@ -1,4 +1,5 @@
 import argparse
+import logging
 from wayfarer.config.loader import load_config
 from wayfarer.core.bridge import Bridge
 from wayfarer.routers.mqtt_router import MQTTRouter
@@ -39,6 +40,23 @@ def main():
         else:
             # unknown transport type; skip or log as needed
             print(f"[WARN] Unknown transport type for {name}: {ttype}")
+
+    # Apply GCS source identity (if configured) to transports at startup.
+    # This ensures outbound MAVLink frames originate from the configured GCS sysid/compid.
+    gcs_cfg = cfg.get("gcs") or {}
+    gcs_sysid = gcs_cfg.get("sysid")
+    gcs_compid = gcs_cfg.get("compid")
+    if gcs_sysid is not None or gcs_compid is not None:
+        for tname, t in transports.items():
+            try:
+                if hasattr(t, "set_source_identity"):
+                    sysid = int(gcs_sysid) if gcs_sysid is not None else None
+                    compid = int(gcs_compid) if gcs_compid is not None else None
+                    t.set_source_identity(sysid, compid)
+                    logging.info(f"transport {tname}: set_source_identity(sysid={sysid}, compid={compid})")
+            except Exception:
+                # best-effort; don't abort startup on failure
+                pass
 
     # wire up bridge <-> components
     bridge = Bridge(cfg, transports, mqtt_router)

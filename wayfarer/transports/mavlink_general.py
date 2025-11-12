@@ -53,8 +53,10 @@ class MavlinkGeneral:
                         self._conn.source_system = self._source_sysid
                     if self._source_compid is not None:
                         self._conn.source_component = self._source_compid
+                    logging.info(f"[mavlink:{self.name}] applied source_identity to live conn sysid={self._source_sysid} compid={self._source_compid}")
                 except Exception:
-                    pass
+                    logging.warning(f"[mavlink:{self.name}] failed to apply source_identity to live conn")
+                
 
     def start(self):
         self._run = True
@@ -112,7 +114,13 @@ class MavlinkGeneral:
                         self._conn_ts = time.time()
                         self._last_heartbeat_ts = None
                         self._heartbeat_warned = False
+                    # Log connection opened and whether we applied a stored source identity
                     logging.info(f"[mavlink:{self.name}] connected/opened")
+                    try:
+                        if self._source_sysid is not None or self._source_compid is not None:
+                            logging.info(f"[mavlink:{self.name}] will apply stored source_identity sysid={self._source_sysid} compid={self._source_compid} on conn")
+                    except Exception:
+                        pass
                 except Exception as e:
                     logging.warning(f"[mavlink:{self.name}] open failed: {e}; retry in 1s")
                     time.sleep(1.0)
@@ -145,13 +153,15 @@ class MavlinkGeneral:
                     logging.warning(f"[mavlink:{self.name}] no HEARTBEAT received >5s after connect; check endpoint={self.endpoint}")
                     self._heartbeat_warned = True
 
-                device_id = self.on_discover(sysid, self.name)
+                device_id = self.on_discover(sysid, self.name, int(compid) if compid is not None else None)
                 pkt = Packet(
                     device_id=device_id,
                     schema="mavlink",
                     msg_type=msg.get_type(),
                     fields=msg.to_dict(),
                     timestamp=time.time(),
+                    src_sysid=int(sysid) if sysid is not None else None,
+                    src_compid=int(compid) if compid is not None else None,
                     origin=self.name,
                 )
                 self.on_packet(pkt)
@@ -181,8 +191,92 @@ class MavlinkGeneral:
                         continue
                     raw = pkt.fields.get("raw")
                     if raw and isinstance(raw, (bytes, bytearray)):
+                        # If the packet carries an explicit source identity and raw
+                        # bytes are present, try to parse and re-send the contained
+                        # MAVLink messages so they appear on-wire with the original
+                        # source sysid/compid. This is a best-effort: we parse the
+                        # raw bytes into one or more MAVLink messages and invoke
+                        # send_command for each parsed message when possible. If
+                        # parsing/re-send fails, fall back to writing raw bytes.
+                        try:
+                            effective_sys = pkt.src_sysid if getattr(pkt, "src_sysid", None) is not None else None
+                            effective_comp = pkt.src_compid if getattr(pkt, "src_compid", None) is not None else None
+                            if effective_sys is not None or effective_comp is not None:
+                                # parse raw bytes into MAVLink messages
+                                parser = mavutil.mavlink.MAVLink(None)
+                                parsed = []
+                                for b in raw:
+                                    try:
+                                        m = parser.parse_char(b)
+                                    except Exception:
+                                        m = None
+                                    if m:
+                                        parsed.append(m)
+                                if parsed:
+                                    for m in parsed:
+                                        try:
+                                            temp_pkt = Packet(
+                                                device_id=pkt.device_id,
+                                                schema=pkt.schema,
+                                                msg_type=m.get_type(),
+                                                fields=m.to_dict(),
+                                                timestamp=pkt.timestamp,
+                                                origin=pkt.origin,
+                                                src_sysid=int(effective_sys) if effective_sys is not None else None,
+                                                src_compid=int(effective_comp) if effective_comp is not None else None,
+                                            )
+                                            # Ensure fields are present for send_command helpers
+                                            temp_pkt.fields["src_sysid"] = temp_pkt.src_sysid
+                                            temp_pkt.fields["src_compid"] = temp_pkt.src_compid
+                                            # Snapshot/restore conn identity around send
+                                            orig_sys = getattr(conn, "source_system", None)
+                                            orig_comp = getattr(conn, "source_component", None)
+                                            try:
+                                                if temp_pkt.src_sysid is not None:
+                                                    conn.source_system = int(temp_pkt.src_sysid)
+                                                if temp_pkt.src_compid is not None:
+                                                    conn.source_component = int(temp_pkt.src_compid)
+                                            except Exception:
+                                                pass
+                                            try:
+                                                send_command(conn, temp_pkt)
+                                            finally:
+                                                try:
+                                                    if orig_sys is not None:
+                                                        conn.source_system = orig_sys
+                                                    if orig_comp is not None:
+                                                        conn.source_component = orig_comp
+                                                except Exception:
+                                                    pass
+                                        except Exception:
+                                            # continue with next parsed message
+                                            continue
+                                    # we handled parsed messages; move to next tx
+                                    continue
+                        except Exception:
+                            # parsing/re-send failed; fall back to raw write
+                            pass
+                        # fallback: write the raw bytes unchanged
                         conn.write(raw)
                     else:
+                        # If the packet carries an explicit source identity, apply it to the
+                        # live connection for the duration of this send so the outgoing
+                        # frames use the original MAVLink source sysid/compid.
+                        try:
+                            effective_sysid = pkt.src_sysid if getattr(pkt, "src_sysid", None) is not None else self._source_sysid
+                            effective_compid = pkt.src_compid if getattr(pkt, "src_compid", None) is not None else self._source_compid
+                            if effective_sysid is not None:
+                                try:
+                                    conn.source_system = int(effective_sysid)
+                                except Exception:
+                                    pass
+                            if effective_compid is not None:
+                                try:
+                                    conn.source_component = int(effective_compid)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                         send_command(conn, pkt)
             except Exception as e:
                 logging.warning(f"[mavlink:{self.name}] tx error: {e}; resetting connection")

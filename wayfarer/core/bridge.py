@@ -7,6 +7,7 @@ from wayfarer.core.constants import (
     MISSION_UPLOAD_TOPIC, CMD_ROOT_TOPIC
 )
 from wayfarer.core.packet import Packet
+import copy
 from wayfarer.core.router import RouteTable
 from wayfarer.core.utils import safe_json
 from wayfarer.core import command_mapper
@@ -114,11 +115,13 @@ class Bridge:
                 pass
 
     # --- called by transports ---
-    def on_discover_mav(self, sysid: int, origin_name: str) -> str:
-        device_id = self.registry.upsert_mav(sysid, origin_name)
+    def on_discover_mav(self, sysid: int, origin_name: str, compid: int = None) -> str:
+        # Record discovered MAV with optional component id
+        device_id = self.registry.upsert_mav(sysid, origin_name, compid)
         topic = DISCOVERY_TOPIC.format(root=self.root, device_id=device_id)
         self.mqtt.publish_telem(topic, {
             "schema":"mavlink","sysid":sysid,"status":"discovered",
+            "compid": compid,
             "transports": list(self.registry.transports_for(device_id))
         }, retain=True)
 
@@ -138,6 +141,12 @@ class Bridge:
         # enqueue for processing -> MQTT publish
         try:
             self.q.put_nowait(pkt)
+        except Exception:
+            pass
+        # Also offer the packet to the outbound routing queue so configured
+        # routes can forward telemetry/frames between transports (transceive).
+        try:
+            self.q_out.put_nowait(pkt)
         except Exception:
             pass
 
@@ -174,6 +183,8 @@ class Bridge:
             msg_type=("MISSION_UPLOAD" if is_mission_upload else payload.get("msg_type", "raw")),
             fields=payload,
             timestamp=time.time(),
+            src_sysid=int(payload.get("sysid")) if payload.get("sysid") is not None else None,
+            src_compid=int(payload.get("compid")) if payload.get("compid") is not None else None,
             origin="mqtt"
         )
         try:
@@ -245,7 +256,51 @@ class Bridge:
                         try:
                             import fnmatch
                             if fnmatch.fnmatch(name, pat):
-                                t.write(pkt)
+                                # Skip sending back to the origin transport to avoid echo loops
+                                if name == pkt.origin:
+                                    continue
+                                # Create a shallow copy per-transport so identity overrides
+                                # do not affect other outputs.
+                                pkt_out = copy.copy(pkt)
+                                # If packet lacks explicit src_sysid, try to infer:
+                                if getattr(pkt_out, "src_sysid", None) is None:
+                                    # 1) try registry lookup from device_id
+                                    if pkt_out.device_id:
+                                        inferred = self.registry.sysid_for_device(pkt_out.device_id)
+                                        if inferred is not None:
+                                            pkt_out.src_sysid = int(inferred)
+                                    # 2) if still unknown and this is a GCS-origin packet, use bridge gcs_sysid
+                                    if getattr(pkt_out, "src_sysid", None) is None and pkt_out.origin == "mavlink_gcs":
+                                        if self.gcs_sysid is not None:
+                                            pkt_out.src_sysid = int(self.gcs_sysid)
+                                    # 3) final fallback: use transport's configured source identity if available
+                                    if getattr(pkt_out, "src_sysid", None) is None:
+                                        try:
+                                            transport_sysid = getattr(t, "_source_sysid", None)
+                                            if transport_sysid is not None:
+                                                pkt_out.src_sysid = int(transport_sysid)
+                                        except Exception:
+                                            pass
+                                # For compid, prefer packet value, else try registry, GCS, then transport default
+                                if getattr(pkt_out, "src_compid", None) is None:
+                                    # 1) try registry lookup from device_id
+                                    if pkt_out.device_id:
+                                        inferred_comp = self.registry.compid_for_device(pkt_out.device_id)
+                                        if inferred_comp is not None:
+                                            pkt_out.src_compid = int(inferred_comp)
+                                    # 2) if still unknown and this is a GCS-origin packet, use bridge gcs_compid
+                                    if getattr(pkt_out, "src_compid", None) is None and pkt_out.origin == "mavlink_gcs":
+                                        if self.gcs_compid is not None:
+                                            pkt_out.src_compid = int(self.gcs_compid)
+                                    # 3) final fallback: use transport's configured source component if available
+                                    if getattr(pkt_out, "src_compid", None) is None:
+                                        try:
+                                            transport_compid = getattr(t, "_source_compid", None)
+                                            if transport_compid is not None:
+                                                pkt_out.src_compid = int(transport_compid)
+                                        except Exception:
+                                            pass
+                                t.write(pkt_out)
                         except Exception:
                             pass
             except Exception:
@@ -269,7 +324,7 @@ class Bridge:
                 }
                 # Enqueue outbound to route loop (no direct writes)
                 try:
-                    hb_pkt = Packet(device_id=self.gcs_device_id, schema="mavlink", msg_type="HEARTBEAT", fields=hb_fields, timestamp=time.time(), origin="mavlink_gcs")
+                    hb_pkt = Packet(device_id=self.gcs_device_id, schema="mavlink", msg_type="HEARTBEAT", fields=hb_fields, timestamp=time.time(), origin="mavlink_gcs", src_sysid=self.gcs_sysid, src_compid=self.gcs_compid)
                     self.q_out.put_nowait(hb_pkt)
                 except Exception:
                     pass
@@ -281,7 +336,7 @@ class Bridge:
                         "req_message_rate": int(self.gcs_request_rate),
                         "start_stop": 1,
                     }
-                    rds_pkt = Packet(device_id=self.gcs_device_id, schema="mavlink", msg_type="REQUEST_DATA_STREAM", fields=rds_fields, timestamp=time.time(), origin="mavlink_gcs")
+                    rds_pkt = Packet(device_id=self.gcs_device_id, schema="mavlink", msg_type="REQUEST_DATA_STREAM", fields=rds_fields, timestamp=time.time(), origin="mavlink_gcs", src_sysid=self.gcs_sysid, src_compid=self.gcs_compid)
                     self.q_out.put_nowait(rds_pkt)
                 except Exception:
                     pass

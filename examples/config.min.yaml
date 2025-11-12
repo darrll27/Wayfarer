@@ -1,9 +1,10 @@
 version: 1
 bridge_id: "wayfarer-bridge-01"
 
-gcs:
+gcs: #wayfarer heartbeat emitter (virtual GCS)
   enabled: true  # set false to disable virtual GCS emitter
   sysid: 254     # device_id automatically becomes mav_sys{sysid};
+  compid: 1    # mavlink component ID for virtual GCS
 
 mqtt:
   host: "localhost"
@@ -14,26 +15,25 @@ mqtt:
   retain_heartbeat: true
 
 transports:
-  mavlink_udp_14445:
+  mavlink_udp_14540:
     type: mavlink_udp
-    endpoint: "udpin:0.0.0.0:14445"
+    endpoint: "udpin:0.0.0.0:14540"
   mavlink_udp_14550:
     type: mavlink_udp
-    endpoint: "udpin:0.0.0.0:14550"
+    endpoint: "udpin:192.168.88.9:14550"
+  mavlink_udp_14445:
+    type: mavlink_udp
+    endpoint: "udp:127.0.0.1:14445"
   mavlink_udp_14551:
     type: mavlink_udp
-    endpoint: "udpin:0.0.0.0:14551"
+    endpoint: "udpout:127.0.0.1:14551"
   mavlink_usb_main:
     type: mavlink_serial
     endpoint: "serial:/dev/cu.usbmodem01:115200"
 
 routes:
-  - from: "mavlink_udp_*"   # wildcard: all mavlink UDP inputs
+  - from: "mavlink_*"   # wildcard: all mavlink or use mavlink_udp_* for UDP inputs
     to:   "mqtt"            # publish telem to MQTT
   - from: "mqtt"
-    to:   "mavlink_udp_*"   # route commands from MQTT to all mavlink UDP outputs
-  - from: "mavlink_usb_*"   # wildcard: all mavlink UDP inputs
-    to:   "mqtt"            # publish telem to MQTT
-  - from: "mqtt"
-    to:   "mavlink_usb_*"   # route commands from MQTT to all mavlink UDP outputs
+    to:   "mavlink_*"   # route commands from MQTT to all mavlink UDP outputs
 
