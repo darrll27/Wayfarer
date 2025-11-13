@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+PyYAML
+mavsdk
+aiofiles
+python-multipart
+pymavlink
+pytest
+pyserial

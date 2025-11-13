@@ -1,0 +1,22 @@
+waypoints:
+- lat: 37.4125
+  lon: -121.998
+  alt: 54
+  frame: 6
+  action: takeoff
+- lat: 37.413
+  lon: -121.9982
+  alt: 59
+  frame: 6
+  action: waypoint
+- lat: 37.4135
+  lon: -121.9984
+  alt: 57
+  frame: 6
+  action: waypoint
+- lat: 37.414
+  lon: -121.9986
+  alt: 52
+  frame: 6
+  action: land
+last_sent: '2025-11-12T23:29:29.260072+00:00'

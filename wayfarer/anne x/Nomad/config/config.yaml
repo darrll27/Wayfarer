@@ -1,0 +1,45 @@
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+internal_gcs_sysid: 250
+
+external_gcs:
+  # ip: { enable_send: bool, enable_recv: bool }
+  "192.168.1.200":
+    enable_send: true
+    enable_recv: true
+
+groups:
+  example_group:
+    name: "example_group"
+    launch_delay_seconds: 5
+    # drones: canonical list (sysid, optional nickname, transport key or direct uri)
+    # This is the preferred, canonical format. A top-level `transports` map is also
+    # provided below so transports can be referenced by key (non-destructive migration).
+    drones:
+      - sysid: 1
+        nickname: null
+        # reference the transport defined in top-level `transports` (bridge1)
+        transport: "bridge1"
+      - sysid: 2
+        nickname: null
+        transport: "udp://0.0.0.0:14552"
+      - sysid: 3
+        nickname: null
+        transport: "udp://0.0.0.0:14553"
+router:
+  # bind address where the router listens for incoming mavlink UDP packets
+  bind: "0.0.0.0:14551"
+  # targets the router forwards packets to (udp://host:port or host:port)
+  targets:
+    - "udp://127.0.0.1:14445"
+    - "udp://127.0.0.1:14550" # example external GCS
+
+transports:
+  # Each transport is an object with a required `uri` and optional `udp_target`.
+  # For serial transports, include `udp_target` so the service can forward to
+  # the router or other local UDP listener.
+  bridge1:
+    uri: "serial:///dev/cu.usbmodem01:115200"
+    udp_target: "udp://127.0.0.1:14550"

@@ -1,0 +1,11 @@
+# Pre-flight template (example): raw mavlink style with variables
+commands:
+  - name: "set_mode_mission"
+    action:
+      cmd: "SET_MODE"
+      params:
+        mode: "MISSION"
+  - name: "arm"
+    action:
+      cmd: "ARM"
+      params: {}
