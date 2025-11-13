@@ -1,45 +1,49 @@
-server:
-  host: "0.0.0.0"
-  port: 8000
+verbose: true
 
-internal_gcs_sysid: 250
+mqtt:
+  host: localhost
+  port: 1883
+  username: null
+  password: null
 
-external_gcs:
-  # ip: { enable_send: bool, enable_recv: bool }
-  "192.168.1.200":
-    enable_send: true
-    enable_recv: true
+# internal GCS sysid/compid
+gcs_sysid: 250
+gcs_compid: 190
 
-groups:
-  example_group:
-    name: "example_group"
-    launch_delay_seconds: 5
-    # drones: canonical list (sysid, optional nickname, transport key or direct uri)
-    # This is the preferred, canonical format. A top-level `transports` map is also
-    # provided below so transports can be referenced by key (non-destructive migration).
-    drones:
-      - sysid: 1
-        nickname: null
-        # reference the transport defined in top-level `transports` (bridge1)
-        transport: "bridge1"
-      - sysid: 2
-        nickname: null
-        transport: "udp://0.0.0.0:14552"
-      - sysid: 3
-        nickname: null
-        transport: "udp://0.0.0.0:14553"
-router:
-  # bind address where the router listens for incoming mavlink UDP packets
-  bind: "0.0.0.0:14551"
-  # targets the router forwards packets to (udp://host:port or host:port)
-  targets:
-    - "udp://127.0.0.1:14445"
-    - "udp://127.0.0.1:14550" # example external GCS
-
+# transports: define UDP/Serial ports to start. UDP host should be 0.0.0.0 to listen.
 transports:
-  # Each transport is an object with a required `uri` and optional `udp_target`.
-  # For serial transports, include `udp_target` so the service can forward to
-  # the router or other local UDP listener.
-  bridge1:
-    uri: "serial:///dev/cu.usbmodem01:115200"
-    udp_target: "udp://127.0.0.1:14550"
+  - type: udp
+    name: udp_QGC
+    host: 127.0.0.1
+    port: 14551
+  - type: serial
+    name: serial_cu_usbmodem01
+    device: /dev/cu.usbmodem01
+    baud: 115200
+
+# groups: define fleets and their drone endpoints (drone id -> udp endpoint)
+groups:
+  alpha:
+    launch_delay_s: 5
+    # drones now reference named endpoints defined in the `endpoints` section below
+    drones:
+      1: drone_alpha_1
+      2: drone_alpha_2
+
+# endpoints: canonical mapping of logical endpoint names to URIs
+# Use these names in `groups.<group>.drones` instead of raw URIs to avoid duplication.
+endpoints:
+  drone_alpha_1: udp://127.0.0.1:14560
+  drone_alpha_2: udp://127.0.0.1:14561
+
+# forwarding rules: forward everything based on PORTS (port-centric)
+# For observability we enqueue into transports (to_port) so the router + mqtt
+# adapters can observe forwarded traffic as if it came from that port.
+forwards:
+  - from: serial_cu_usbmodem01
+    dedupe_window: 0.5
+    to:
+      - type: to_port
+        port_name: drone_alpha_1
+      - type: to_port
+        port_name: udp_QGC

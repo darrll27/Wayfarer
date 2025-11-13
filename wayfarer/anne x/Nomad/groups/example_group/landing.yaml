@@ -1,5 +1,0 @@
-commands:
-  - name: "land"
-    action:
-      cmd: "LAND"
-      params: {}

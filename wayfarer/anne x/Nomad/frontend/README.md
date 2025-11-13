@@ -1,31 +1,30 @@
-NOMAD Frontend
+Nomad Electron frontend (dev scaffold)
 
-Quick start (dev):
+This folder contains a minimal Electron + Vite + React scaffold that starts an in-process Aedes MQTT broker
+(listening on websocket port 1884) and connects the renderer to it via MQTT over WebSocket.
 
-1. Install dependencies
+Quick start (from repo root):
+
+1. Install node deps
 
 ```bash
 cd frontend
 npm install
 ```
 
-2. Start dev + Electron (runs Vite and opens Electron window):
+2. Start dev mode (starts Vite and Electron)
 
 ```bash
-npm start
+cd frontend
+npm run dev
 ```
 
-- `npm run dev` runs the Vite dev server (http://localhost:5173).
-- `npm run electron:dev` waits for the dev server and opens Electron.
+Notes
+- The Electron main process will also attempt to spawn the Python backend using the script `backend/mav_router/run_router.py`.
+  Ensure Python and required Python deps are available in your environment if you want the backend to run.
+- For production packaging, you'll want to bundle the Python backend into the app and adjust paths; this scaffold focuses on dev workflow.
 
-Build for production:
-
-```bash
-npm run build
-# then package electron app with your preferred packager (electron-builder, electron-forge, etc.)
-```
-
-Notes:
-- The app uses a canonical backend config (`/config`) and endpoints under `/groups` and `/groups/:name/waypoints`.
-- The footer displays: "NOMAD — Nominal Online Multiple Asset Director".
+Design choices
+- Frontend connects to a local Aedes broker over WebSocket so the UI can subscribe to MQTT topics without an external broker.
+- The Python backend remains decoupled (it publishes to an external/local MQTT broker). The Electron main spawns it during dev so a single `npm run dev` can bring up the whole stack if Python deps are installed.
 
