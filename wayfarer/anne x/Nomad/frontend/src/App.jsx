@@ -1,5 +1,9 @@
 import React, {useEffect, useState, useRef} from 'react'
-import mqtt from 'mqtt'
+
+// Decide at runtime whether we're in Electron (renderer) or a browser dev server.
+// Electron renderer can use the Node mqtt client to connect to tcp://localhost:1883.
+// Browser dev (Vite) must use the websocket bridge at ws://localhost:1884.
+const isElectron = typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Electron') || (typeof window !== 'undefined' && window.process && window.process.versions && window.process.versions.electron)
 
 export default function App() {
   const [connStatus, setConnStatus] = useState('disconnected')
@@ -9,39 +13,58 @@ export default function App() {
   const clientRef = useRef(null)
 
   useEffect(() => {
-    // connect to the local Aedes websocket broker started by Electron main
-    const client = mqtt.connect('ws://localhost:1884')
-    clientRef.current = client
+    let mounted = true
+    let client = null
 
-    client.on('connect', () => {
-      setConnStatus('connected')
-      // subscribe to a few useful topics
-      client.subscribe('device/+/+/HEARTBEAT/#')
-      client.subscribe('device/+/+/RAW')
-      client.subscribe('nomad/status')
-      client.subscribe('Nomad/config')
-    })
+    async function startClient() {
+      try {
+        const connectUrl = isElectron ? 'mqtt://localhost:1883' : 'ws://localhost:1884'
+        // dynamic import to avoid bundling node-only mqtt into browser build
+        const mqttModule = isElectron ? await import('mqtt') : await import('mqtt/dist/mqtt')
+        client = mqttModule.connect(connectUrl)
+        clientRef.current = client
 
-    client.on('message', (topic, payload) => {
-      const msg = payload.toString()
-      // if this is a backend status message, parse and store separately
-      if (topic === 'nomad/status') {
-        try {
-          const obj = JSON.parse(msg)
-          setBackendStatus(obj)
-        } catch (e) {
-          setBackendStatus({raw: msg})
-        }
+        client.on('connect', () => {
+          if (!mounted) return
+          setConnStatus('connected')
+          // subscribe to a few useful topics
+          client.subscribe('device/+/+/HEARTBEAT/#')
+          client.subscribe('device/+/+/RAW')
+          client.subscribe('nomad/status')
+          client.subscribe('Nomad/config')
+        })
+
+        client.on('message', (topic, payload) => {
+          const msg = payload.toString()
+          // if this is a backend status message, parse and store separately
+          if (topic === 'nomad/status') {
+            try {
+              const obj = JSON.parse(msg)
+              setBackendStatus(obj)
+            } catch (e) {
+              setBackendStatus({raw: msg})
+            }
+          }
+          setTelemetry((s) => [{topic, msg, ts: Date.now()}].concat(s).slice(0, 50))
+        })
+
+        client.on('reconnect', () => setConnStatus('reconnecting'))
+        client.on('close', () => setConnStatus('disconnected'))
+        client.on('error', (e) => console.error('mqtt error', e))
+      } catch (e) {
+        console.error('failed to start mqtt client', e)
       }
-      setTelemetry((s) => [{topic, msg, ts: Date.now()}].concat(s).slice(0, 50))
-    })
+    }
 
-    client.on('reconnect', () => setConnStatus('reconnecting'))
-    client.on('close', () => setConnStatus('disconnected'))
-    client.on('error', (e) => console.error('mqtt error', e))
+    startClient()
 
     return () => {
-      client.end()
+      mounted = false
+      try {
+        if (clientRef.current) clientRef.current.end()
+      } catch (e) {
+        // ignore
+      }
     }
   }, [])
 
@@ -81,7 +104,7 @@ export default function App() {
         </div>
 
         <div style={{marginTop: 12, display: 'flex', gap: 12}}>
-          <button onClick={sendMissionTest} style={{padding: '8px 12px', borderRadius: 6}}>Run mission test (demo)</button>
+          <button onClick={sendLoadWaypointsDemo} style={{padding: '8px 12px', borderRadius: 6}}>Send demo waypoints (validate)</button>
           <div style={{fontSize: 12, color: '#94a3b8'}}>Config: <span style={{fontFamily: 'monospace'}}>{/* show latest config if any */}</span></div>
         </div>
         <div style={{maxHeight: 400, overflow: 'auto', background: '#0f172a', color: '#cbd5e1', padding: 8, borderRadius: 6}}>
