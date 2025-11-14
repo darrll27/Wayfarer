@@ -48,9 +48,30 @@ def load_config(repo_root: Path = None) -> dict:
     cfg["groups"] = user_cfg.get("groups", {})
     cfg["forwards"] = user_cfg.get("forwards", [])
 
-    # merge mqtt explicitly
-    mqtt = user_cfg.get("mqtt", {})
-    cfg["mqtt"] = {**cfg["mqtt"], **(mqtt or {})}
+    # mqtt broker settings: prefer a centralized broker.json in config/, otherwise fall back
+    # to any mqtt block in config.yaml for backward compatibility.
+    try:
+        broker_path = repo_root / 'config' / 'broker.json'
+        if broker_path.exists():
+            import json
+
+            with broker_path.open('r') as bf:
+                b = json.load(bf) or {}
+            cfg['mqtt'] = {
+                'host': b.get('host', cfg['mqtt']['host']),
+                'port': int(b.get('tcp_port', cfg['mqtt']['port'])),
+                'username': b.get('username', cfg['mqtt'].get('username') if isinstance(b.get('username'), dict) else b.get('username')),
+                'password': b.get('password', cfg['mqtt'].get('password')),
+                'keepalive': cfg['mqtt'].get('keepalive', 60),
+            }
+        else:
+            # fallback to any mqtt block present in config.yaml
+            mqtt = user_cfg.get('mqtt', {})
+            cfg['mqtt'] = {**cfg['mqtt'], **(mqtt or {})}
+    except Exception:
+        # on error, keep DEFAULTS merged with yaml mqtt if present
+        mqtt = user_cfg.get('mqtt', {})
+        cfg['mqtt'] = {**cfg['mqtt'], **(mqtt or {})}
 
     # scalar overrides
     if "gcs_sysid" in user_cfg:

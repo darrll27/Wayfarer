@@ -11,6 +11,8 @@ from backend.mav_router.transport import UDPPort, SerialPort
 from backend.mav_router.router import Router
 from backend.mav_router.mqtt_adapter import MQTTAdapter
 from backend.config_manager import load_config, parse_endpoint_uri, resolve_endpoint
+import json
+from pathlib import Path
 
 
 def main():

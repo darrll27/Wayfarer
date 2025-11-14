@@ -1,0 +1,10 @@
+{
+  "name": "nomad-dev-root",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "sh ./scripts/dev.sh",
+    "dev:desktop": "sh ./scripts/dev.sh desktop",
+    "backend": "uvicorn backend.config_api:app --reload --port 8000"
+  }
+}

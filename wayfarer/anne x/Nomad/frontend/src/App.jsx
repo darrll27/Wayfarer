@@ -9,19 +9,130 @@ export default function App() {
   const [connStatus, setConnStatus] = useState('disconnected')
   const [telemetry, setTelemetry] = useState([])
   const [backendStatus, setBackendStatus] = useState(null)
+  const [brokerConfig, setBrokerConfig] = useState(null)
+  const [brokerMissing, setBrokerMissing] = useState(false)
+  const [brokerError, setBrokerError] = useState(null)
+  const [page, setPage] = useState('telemetry')
 
   const clientRef = useRef(null)
 
+  // fetch the centralized broker config. returns object or null
+  async function fetchBrokerConfig() {
+    try {
+      // If running in packaged Electron, prefer the preload API which reads the file from disk
+      if (isElectron && window && window.electronAPI && typeof window.electronAPI.getBrokerConfig === 'function') {
+        const cfg = await window.electronAPI.getBrokerConfig()
+        if (!cfg) {
+          setBrokerMissing(true)
+          setBrokerError('electron preload: no broker.json found')
+          setBrokerConfig(null)
+          return null
+        }
+        setBrokerConfig(cfg)
+        setBrokerMissing(false)
+        setBrokerError(null)
+        return cfg
+      }
+
+      const resp = await fetch('/api/config')
+      if (!resp.ok) {
+        const text = await resp.text()
+        const err = `HTTP ${resp.status} ${resp.statusText}: ${text}`
+        setBrokerMissing(true)
+        setBrokerError(err)
+        setBrokerConfig(null)
+        console.warn('broker config fetch failed:', err)
+        return null
+      }
+      const json = await resp.json()
+      setBrokerConfig(json)
+      setBrokerMissing(false)
+      setBrokerError(null)
+      return json
+    } catch (e) {
+      setBrokerMissing(true)
+      setBrokerError(String(e))
+      setBrokerConfig(null)
+      console.warn('broker config fetch error', e)
+      return null
+    }
+  }
+
+  // connect using a broker config object
+  async function connectWithBroker(broker, mountedRef) {
+    let client = null
+    try {
+      const host = broker.host
+      const tcp_port = broker.tcp_port
+      const ws_port = broker.ws_port
+      const connectUrl = isElectron ? `mqtt://${host}:${tcp_port}` : `ws://${host}:${ws_port}`
+      const mqttModule = isElectron ? await import('mqtt') : await import('mqtt/dist/mqtt')
+      client = mqttModule.connect(connectUrl)
+      clientRef.current = client
+
+      client.on('connect', () => {
+        if (!mountedRef.current) return
+        setConnStatus('connected')
+        client.subscribe('device/+/+/HEARTBEAT/#')
+        client.subscribe('device/+/+/RAW')
+        client.subscribe('nomad/status')
+        client.subscribe('Nomad/config')
+      })
+
+      client.on('message', (topic, payload) => {
+        const msg = payload.toString()
+        if (topic === 'nomad/status') {
+          try {
+            const obj = JSON.parse(msg)
+            setBackendStatus(obj)
+          } catch (e) {
+            setBackendStatus({raw: msg})
+          }
+        }
+        setTelemetry((s) => [{topic, msg, ts: Date.now()}].concat(s).slice(0, 50))
+      })
+
+      client.on('reconnect', () => setConnStatus('reconnecting'))
+      client.on('close', () => setConnStatus('disconnected'))
+      client.on('error', (e) => {
+        console.error('mqtt error', e)
+        setBrokerError(String(e))
+      })
+    } catch (e) {
+      console.error('failed to start mqtt client', e)
+      setBrokerError(String(e))
+    }
+    return client
+  }
+
   useEffect(() => {
     let mounted = true
+    const mountedRef = { current: true }
     let client = null
+
+    // poll backend status endpoint so we can show whether backend service is up
+    let statusInterval = null
+    async function pollStatus() {
+      try {
+        const r = await fetch('/api/status')
+        if (!r.ok) return
+        const j = await r.json()
+        setBackendStatus(j)
+      } catch (e) {
+        // ignore
+      }
+    }
+    pollStatus()
+    statusInterval = setInterval(pollStatus, 3000)
 
     async function startClient() {
       try {
-        const connectUrl = isElectron ? 'mqtt://localhost:1883' : 'ws://localhost:1884'
-        // dynamic import to avoid bundling node-only mqtt into browser build
-        const mqttModule = isElectron ? await import('mqtt') : await import('mqtt/dist/mqtt')
-        client = mqttModule.connect(connectUrl)
+        const broker = await fetchBrokerConfig()
+        if (!broker) {
+          setConnStatus('no-broker-config')
+          return
+        }
+        client = await connectWithBroker(broker, { current: mounted })
         clientRef.current = client
 
         client.on('connect', () => {
@@ -59,12 +170,13 @@ export default function App() {
     startClient()
 
     return () => {
-      mounted = false
       try {
         if (clientRef.current) clientRef.current.end()
       } catch (e) {
         // ignore
       }
+      mountedRef.current = false
+      if (statusInterval) clearInterval(statusInterval)
     }
   }, [])
 
@@ -83,14 +195,42 @@ export default function App() {
     }
   }
 
+  const retryFetchBroker = async () => {
+    setBrokerError(null)
+    setBrokerMissing(false)
+    setConnStatus('reloading-broker-config')
+    const b = await fetchBrokerConfig()
+    if (b) {
+      setConnStatus('connecting')
+      try {
+        const client = await connectWithBroker(b, { current: true })
+        if (client) {
+          setConnStatus('connected')
+        }
+      } catch (e) {
+        console.error('connectWithBroker failed', e)
+        setBrokerError(String(e))
+        setConnStatus('connect-failed')
+      }
+    } else {
+      setConnStatus('no-broker-config')
+    }
+  }
+
     return (
-    <div style={{fontFamily: 'Inter, system-ui, sans-serif', padding: 24}}>
-      <header style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-        <h1>Nomad</h1>
-        <div>
-          <strong>Broker:</strong> Aedes (ws://localhost:1884)
-          <br />
-          <strong>Connection:</strong> {connStatus}
+    <div style={{fontFamily: 'Inter, system-ui, sans-serif', padding: 12, display: 'flex', flexDirection: 'column', minHeight: '100vh'}}>
+      <header style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid #e6edf3'}}>
+        <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+          <h1 style={{margin: 0}}>Nomad</h1>
+          <nav>
+            <button onClick={() => setPage('telemetry')} style={{marginRight: 8}}>Telemetry</button>
+            <button onClick={() => setPage('waypoints')} style={{marginRight: 8}}>Waypoints</button>
+            <button onClick={() => setPage('settings')} style={{marginRight: 8}}>Settings</button>
+          </nav>
+        </div>
+        <div style={{textAlign: 'right'}}>
+          <div style={{fontSize: 12, color: '#6b7280'}}>Connection: <strong>{connStatus}</strong></div>
+          <div style={{fontSize: 12, color: '#6b7280'}}>{brokerConfig ? `${brokerConfig.host}:${isElectron ? brokerConfig.tcp_port : brokerConfig.ws_port}` : (brokerMissing ? 'no broker config' : 'loading...')}</div>
         </div>
       </header>
 
@@ -105,7 +245,6 @@ export default function App() {
 
         <div style={{marginTop: 12, display: 'flex', gap: 12}}>
           <button onClick={sendLoadWaypointsDemo} style={{padding: '8px 12px', borderRadius: 6}}>Send demo waypoints (validate)</button>
-          <div style={{fontSize: 12, color: '#94a3b8'}}>Config: <span style={{fontFamily: 'monospace'}}>{/* show latest config if any */}</span></div>
         </div>
         <div style={{maxHeight: 400, overflow: 'auto', background: '#0f172a', color: '#cbd5e1', padding: 8, borderRadius: 6}}>
           {telemetry.length === 0 ? (
@@ -121,8 +260,27 @@ export default function App() {
         </div>
       </section>
 
-      <footer style={{marginTop: 24, color: '#6b7280'}}>
-        Small demo UI — subscribes to `device/...` and `nomad/status` topics. Customize to match the project's MQTT topic schema.
+      <div style={{flex: 1}} />
+
+      <footer style={{borderTop: '1px solid #e6edf3', padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+        <div style={{fontSize: 12, color: '#6b7280'}}>Backend: {backendStatus ? (backendStatus.ok ? 'online' : 'offline') : 'unknown'}</div>
+        <div style={{fontSize: 12, color: '#6b7280'}}>Broker: {brokerConfig ? `${brokerConfig.host}:${isElectron ? brokerConfig.tcp_port : brokerConfig.ws_port}` : (brokerMissing ? 'missing' : 'loading')}</div>
+        <div style={{fontSize: 12, color: '#6b7280', textAlign: 'right', maxWidth: '40%'}}>
+          {brokerMissing ? (
+            <div>
+              <div style={{color: '#b91c1c'}}>broker.json missing or incomplete — see <code>config/broker.json</code></div>
+              <div style={{marginTop: 6}}>
+                <button onClick={retryFetchBroker} style={{padding: '6px 8px', borderRadius: 6}}>Reload broker config</button>
+              </div>
+            </div>
+          ) : brokerError ? (
+            <div style={{color: '#b91c1c'}}>Broker error: {brokerError}</div>
+          ) : brokerConfig ? (
+            <div style={{fontFamily: 'monospace', fontSize: 12, overflowX: 'auto'}}>{JSON.stringify(brokerConfig)}</div>
+          ) : (
+            <div style={{color: '#94a3b8'}}>config loading...</div>
+          )}
+        </div>
       </footer>
     </div>
   )

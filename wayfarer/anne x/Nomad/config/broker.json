@@ -1,0 +1,11 @@
+
+{
+  "mode": "internal",
+  "host": "localhost",
+  "tcp_port": 1883,
+  "ws_port": 1884,
+  "username": null,
+  "password": null,
+  "notes": "mode: internal => spawn local Aedes; external => do not spawn (assume external broker at host:tcp_port/ws_port)"
+}
+

@@ -5,6 +5,7 @@ const isDev = process.env.NODE_ENV !== 'production';
 let mainWindow;
 let aedesServer;
 let backendProc;
+let backendApiProc;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -58,12 +59,32 @@ function startBackend() {
   }
 }
 
+function startBackendApi() {
+  const {spawn} = require('child_process');
+  const repoRoot = path.resolve(__dirname, '..', '..');
+  // run uvicorn to serve backend config/status API
+  // do not enable uvicorn --reload when spawning from Electron to avoid
+  // duplicate process/reloader behavior which interferes with router subprocess startup.
+  const args = ['-m', 'uvicorn', 'backend.config_api:app', '--port', '8000'];
+  try {
+    backendApiProc = spawn('python3', args, {cwd: repoRoot, env: process.env});
+    backendApiProc.stdout.on('data', (d) => console.log(`[backend-api] ${d.toString().trim()}`));
+    backendApiProc.stderr.on('data', (d) => console.error(`[backend-api-err] ${d.toString().trim()}`));
+    backendApiProc.on('exit', (code, sig) => console.log(`[backend-api] exited code=${code} sig=${sig}`));
+  } catch (e) {
+    console.error('[main] Failed to spawn backend API:', e);
+  }
+}
+
 app.whenReady().then(() => {
   // Start local Aedes broker for the renderer to connect via MQTT over WS
   startAedes(1884);
 
   // Optionally start the Python backend so the packaged app contains it.
   // Use a separate process so the router remains decoupled.
+  // start the backend API first so the router and Aedes scripts can query config/status
+  startBackendApi();
+  // then start the main run_router process
   startBackend();
 
   createWindow();
@@ -80,6 +101,9 @@ app.on('window-all-closed', function () {
 app.on('before-quit', () => {
   try {
     if (backendProc) backendProc.kill();
+  } catch (e) {}
+  try {
+    if (backendApiProc) backendApiProc.kill();
   } catch (e) {}
   try {
     if (aedesServer && aedesServer.server) aedesServer.server.close();

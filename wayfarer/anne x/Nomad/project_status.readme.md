@@ -11,90 +11,111 @@ How to run (development)
 -------------------------
 - Activate Python venv and run backend router (from repo root):
 
+```markdown
+Project Status — Nomad (snapshot)
+================================
+
+Date: 2025-11-15
+
+Snapshot
+--------
+This document captures the current codebase state (frontend + backend), known issues, UX observations, and a prioritized next-steps roadmap. It reflects the code and documentation in the repository (notably `instructions.md`) and what a developer needs to pick up work quickly.
+
+Quick dev run notes (dev-only)
+------------------------------
+- Recommended: create and activate the repo venv, install Python deps from `requirements.txt`, then run the router harness.
+
 ```bash
 source .venv/bin/activate
 python backend/mav_router/run_router.py
 ```
 
-- Start the frontend (dev server + Aedes broker) from `frontend/`:
+- Frontend dev (from `frontend/`):
 
 ```bash
 cd frontend
-npm install    # once
-npm run aedes  # starts a local Aedes broker (ws on 1884)
-npm run dev    # starts Vite dev server
+npm install    # first time
+npm run aedes  # starts local Aedes broker (tcp:1883, ws:1884)
+npm run dev    # Vite dev server for the React UI
 ```
 
-Frontend status
----------------
-What works:
-- Small React/Vite demo app exists in `frontend/`.
-- It connects to a local Aedes websocket broker (ws://localhost:1884) using the `mqtt` package.
-- Subscribes to key topics: `device/+/+/HEARTBEAT/#`, `device/+/+/RAW`, `nomad/status`, `Nomad/config` and displays recent messages.
-- Demo action: publishes a `command/<sysid>/<compid>/load_waypoints` payload (see `sendLoadWaypointsDemo`) to exercise backend waypoint validation.
+What exists now (technical)
+---------------------------
+- Frontend: a small React/Vite demo lives in `frontend/`. It connects via MQTT (ws) to the local Aedes broker and subscribes to a handful of topics.
+- Backend: Python services under `backend/` implementing a MAVLink router skeleton, transports (UDP/Serial), MQTT adapter bridge, MAVLink encoder helpers, GCS heartbeat generator, and a waypoint validator skeleton.
+- Broker: Aedes server used for local dev (TCP+WebSocket), invoked via helper scripts in `frontend/`.
 
-Known frontend issues / TODOs:
-- UI bug: the demo button in `frontend/src/App.jsx` currently calls `sendMissionTest`, which is undefined and will throw when clicked. It should call `sendLoadWaypointsDemo` (or wire a properly named handler).
-- The UI is a lightweight demo and needs further pages (fleet dashboard, telemetry panels, waypoint manager, command panel) to be feature-complete.
-- No automated UI tests exist yet.
+What works (high level)
+-----------------------
+- Router and transports: UDP and serial transport skeletons and a routing core that extracts sysid/compid and applies forwarding rules with a dedupe cache.
+- MQTT adapter: decodes MAVLink (using pymavlink where available), publishes structured `device/...` and `sources/...` topics, and listens to `command/<sysid>/<compid>/details` to translate into MAVLink messages (COMMAND_LONG, MISSION_ITEM_INT).
+- Waypoint validator: a validator exists that reads YAML and computes a file hash; `load_waypoints` flows are validation-only (do not auto-run uploads).
+- GCS heartbeat: generator built to emit a periodic HEARTBEAT with QGC-like defaults (1 Hz).
 
-Backend status
---------------
-What works (implemented):
-- MAVLink transport processes: UDP listener and Serial listener skeletons implemented under `backend/mav_router/transport.py`. They enqueue inbound packets into the router and publish copies to the MQTT publisher queue for the adapter.
-- Router (`backend/mav_router/router.py`): parses MAVLink v1/v2 headers to extract sysid/compid, maintains `observed_sysids` and `last_addr`, implements forwarding rules and a global per-packet dedupe cache to reduce forwarding loops.
-- MQTT adapter (`backend/mav_router/mqtt_adapter.py`):
-  - Decodes MAVLink messages using `pymavlink` when available and publishes structured MQTT topics: `device/sysid_<n>/compid_<m>/<MSG>` plus (optional) per-field topics under `device/.../<MSG>/<field>`, and a `sources/.../<port>` view.
-  - Fallback to RAW hex topics when parsing unavailable or when message fails parsing.
-  - Supports receiving `command/<sysid>/<compid>/details` and encoding `COMMAND_LONG` and `MISSION_ITEM_INT` to inject into transport out queues.
-  - New config toggles: `mqtt.publish_fields` (defaults OFF) to avoid per-field expansions that inflate device/# message counts; `mqtt.debug_publish_counts` to help diagnose publish rates.
-- MAVLink encoder (`backend/mav_router/mavlink_encoder.py`): helper functions encode COMMAND_LONG, MISSION_ITEM_INT, and encode HEARTBEAT. The GCS heartbeat defaults were aligned to match QGC: `base_mode=192` and `system_status=4`.
-- GCS heartbeat generator (`backend/mav_router/gcs_heartbeat.py`): background thread that injects a periodic (1 Hz) HEARTBEAT into transports. Optional debug with `gcs_heartbeat_debug` added to detect unexpected fast ticks.
-- Waypoint validator skeleton exists at `backend/waypoint_validator/validator.py` (validates YAML, computes hash) and is used by MQTTAdapter when receiving `load_waypoints` commands (validation-only behavior — does not auto-run uploads).
-- `run_router.py` is a dev harness to start transports, router, and the MQTT adapter and heartbeat generator.
+UX / User experience observations (important)
+-------------------------------------------
+The current UI is a functional demo but lacks a coherent user experience. To make the app usable by operators and testers we should address the following:
 
-Known backend issues / notes:
-- There was an observed issue where `device/` topics appeared at much higher rates than `sources/` topics; root cause was mainly per-field publishes (1 + N fields) inflating device counts. A config toggle `mqtt.publish_fields` was added to disable per-field publishing by default.
-- A prior attempted change to avoid sending heartbeats to local endpoints was reverted after user requested local listeners still receive heartbeats; ensure heartbeat loops are monitored (use `gcs_heartbeat_debug: true` and `mqtt.debug_publish_counts: true` for troubleshooting).
-- The router's dedupe and forwarding logic exists but complex forwarding graphs may still produce loops; instrumenting counters in Router and transports is recommended when debugging.
+- Missing core flows: there is no clear primary navigation (no Mission Control, Telemetry, Waypoint Manager, or Command Panel). Users cannot complete end-to-end tasks (validate/upload waypoints, monitor heartbeats, select a drone and command it) without manual/topic-level work.
+- Feedback & confirmations: commands from the UI need explicit success/failure acknowledgement (command ack UI, loader / progress / toast messages). Right now the UI fires topics but provides limited feedback.
+- Map & mission visualization: waypoint preview on a map is required for user trust — this is referenced in `instructions.md` and currently missing.
+- Broker & backend status: users must be informed when the MQTT broker or backend is unreachable. The frontend sometimes falls back silently; prefer a prominent banner with action (retry, show logs, provide instructions to start services).
+- Message explorer: a simple MQTT topic explorer with counts and last message preview would greatly improve UX for debugging.
+- Accessibility & polish: color contrast, keyboard navigation, and clear iconography will be needed for a production-feeling UI.
+
+Known issues and troubleshooting hints
+------------------------------------
+- Per-field publishing inflation: `device/.../<MSG>/<field>` expansion can cause large numbers of MQTT messages; `mqtt.publish_fields` default is OFF to avoid this.
+- Duplicate router starts: in dev, running uvicorn with `--reload` while also spawning the router caused duplicate router processes; orchestrator scripts now avoid `--reload`.
+- Router state machine: the mission upload state machine is not fully implemented (MISSION_COUNT → MISSION_ITEM_INT → verification).
 
 Files of interest
 -----------------
-- backend/mav_router/router.py — routing, dedupe logic
-- backend/mav_router/mqtt_adapter.py — MQTT bridge, decoding, encoding
-- backend/mav_router/mavlink_encoder.py — encode_heartbeat, encode_command_long, mission encoders
-- backend/mav_router/gcs_heartbeat.py — heartbeat generator
-- backend/mav_router/transport.py — UDP and serial transports
-- backend/waypoint_validator/validator.py — waypoint validation
-- frontend/src/App.jsx — demo React UI
-- frontend/package.json — scripts and aedes helper
+- `backend/mav_router/router.py` — routing & dedupe logic
+- `backend/mav_router/mqtt_adapter.py` — bridge, decode/encode, publishes `nomad/status`
+- `backend/mav_router/mavlink_encoder.py` — MAVLink helpers
+- `backend/mav_router/gcs_heartbeat.py` — GCS heartbeat generator
+- `backend/waypoint_validator/validator.py` — waypoint YAML validation
+- `frontend/src/App.jsx` — demo UI and places to add telemetry/commands
+- `instructions.md` — authoritative topic schema, regexes, and design constraints (must follow)
 
-Next steps for the incoming GitHub agent / developer
---------------------------------------------------
-High priority (to make the project handover-ready):
-1. Fix the frontend demo button: change `sendMissionTest` to `sendLoadWaypointsDemo` (or rename the handler consistently) so the demo button works.
-2. Add a small smoke/integration test that:
-   - Starts the router (in a test harness or with mocked queues), injects a raw heartbeat packet, and asserts the MQTTAdapter publishes a single `device/.../HEARTBEAT` and `sources/...` message.
-3. Add Router instrumentation to count per-packet forwards and expose intermittent metrics on `nomad/status` (helpful to detect amplification loops).
+Prioritized Next Steps (actionable roadmap)
+------------------------------------------
+The list below is ordered by impact: short quick wins first, then stability/features, then medium-term polish and packaging.
 
-Medium priority (stability & features):
-1. Expand the frontend: implement telemetry panels, heartbeat-driven drone list, waypoint upload UI, command panel, and config editor.
-2. Implement mission upload state machine (MISSION_COUNT → MISSION_ITEM_INT → verification) and associated unit tests.
-3. Add basic auth or token support to Aedes if the app will run on untrusted networks.
+Immediate (next 1–3 days)
+- Fix the demo button handler in `frontend/src/App.jsx` to prevent the runtime error (change `sendMissionTest` → `sendLoadWaypointsDemo` or rename consistently). Low risk, quick win.
+- Add a visible broker/backend status banner in the UI showing: broker reachability (ws/tcp), API `/api/status` health, and router_running. When unreachable, disable GCS/drone controls and show a clear action button (Retry / Open docs).
+- Make `nomad/status` publishing a visible heartbeat in the UI (small status tile) so the user sees the system is alive.
 
-Low priority / nice-to-have:
-1. Add end-to-end tests with a local Aedes broker, a simulated UDP peer, and assertions on MQTT topics.
-2. Add CI checks to run lints and basic unit tests.
-3. Add a packaged venv or Dockerfile for reproducible backend runs.
+High priority (next 1–2 weeks)
+- Implement mission upload state machine (MISSION_COUNT → MISSION_ITEM_INT → verify). Add unit tests for the sequence and edge cases (timeouts, NACKs).
+- Add a small smoke test harness: run the router (or a harness of its core components) and assert one heartbeat packet produces both `device/.../HEARTBEAT` and `sources/...` MQTT publishes. Integrate this into CI.
+- Add Router instrumentation: per-packet forward counters and publish these metrics periodically on `nomad/status` to help detect amplification loops.
 
-Contact notes for handover
--------------------------
-- The authoritative topic schema and conventions are in `instructions.md` (follow exact regexes for topic parsing and publishing).
-- GCS sysid convention: 250 (used across the codebase).
-- Keep forwarding semantics port-centric — don't mutate sysid/compid when forwarding.
+Medium priority (2–6 weeks)
+- UX work: implement core frontend pages: Fleet Dashboard, Telemetry Panel (per-drone telemetry stream + last value), Waypoint Manager (file upload + validation + map preview), and Command Panel (arm/disarm/takeoff/land with acks).
+- Message explorer & topic inspector: UI to subscribe to arbitrary topics, filter, and display counts + last message.
+- Packaging: design and implement a reproducible packaging strategy for the Python backend (packaged venv or pyinstaller artifacts) and integrate with Electron builds.
 
-If you want, I can also create:
-- A small frontend fix patch (1-line) to make the demo button work now.
-- A minimal smoke test that encodes a heartbeat, feeds it into the adapter loop, and asserts MQTT publishes.
+Longer term / nice-to-have
+- Auth & security for Aedes (token/JWT) if deploying beyond local dev. Keep simple token-based auth initially.
+- End-to-end integration tests with local Aedes and simulated UDP peers for CI.
+- Documentation: developer onboarding README that includes `scripts/dev.sh` usage, how to package the Python runtime, and steps to reproduce common issues.
+
+Assumptions & constraints
+-----------------------
+- We must preserve the authoritative topic schema and regexes in `instructions.md`.
+- The router should not mutate sysid/compid — routing remains port-centric.
+- The app will initially target local/dev usage; secure production deployment is a separate follow-up.
+
+How I validated this update
+---------------------------
+- I read `instructions.md` (topic schema and contracts) and reviewed the current `project_status.readme.md` content. The Next Steps above derive from the repository state and the constraints written in `instructions.md`.
+
+If you want, next I can:
+- Apply the one-line frontend fix for the broken demo button and run a quick smoke test locally.
+- Create the minimal smoke/integration test harness to catch regressions on heartbeat → MQTT publish.
 
 End of status
+```

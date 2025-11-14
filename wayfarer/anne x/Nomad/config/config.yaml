@@ -1,11 +1,5 @@
+# Centralized broker config is in config/broker.json. Keep this file focused on transports/groups/forwards.
 verbose: true
-
-mqtt:
-  host: localhost
-  port: 1883
-  username: null
-  password: null
-
 # internal GCS sysid/compid
 gcs_sysid: 250
 gcs_compid: 190
