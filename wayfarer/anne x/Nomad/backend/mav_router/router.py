@@ -146,6 +146,10 @@ class Router:
                                 try:
                                     # put into that port's out_q so it will be sent out
                                     self.ports[target_port]["out_q"].put((dest_addr, data))
+                                    try:
+                                        print(f"[router] enqueued forwarded packet to port={target_port} dest={dest_addr} len={len(data)}")
+                                    except Exception:
+                                        pass
                                 except Exception:
                                     pass
                         # mark forwarded
@@ -184,6 +188,10 @@ class Router:
             # If dest_addr is unknown, router will still put None and transport may drop or handle
             try:
                 out_q.put((dest_addr, data))
+                try:
+                    print(f"[router] enqueued packet to port={dp} dest={dest_addr} len={len(data)}")
+                except Exception:
+                    pass
             except Exception:
                 pass
 

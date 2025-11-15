@@ -88,12 +88,18 @@ def start_gcs_heartbeat(cfg: dict, ports: Dict[str, Dict], router):
             for pname, meta in list(ports.items()):
                 try:
                     dest = _collect_dest_for_port(pname, cfg, router)
+                    # report decision for traceability
+                    if debug:
+                        try:
+                            print(f"[gcs_heartbeat] eval port={pname} dest_resolved={dest is not None}")
+                        except Exception:
+                            pass
+
                     # if dest is explicitly None but port exists (serial), send (None, hb)
                     # if dest is tuple (host,port) send to that addr
                     if dest is None:
                         # check whether this was a serial mapping: if transport is serial we still want to write
                         # otherwise skip
-                        # we conservatively enqueue (None, hb) if port name starts with 'serial' or the transports list shows serial
                         is_serial = False
                         for t in cfg.get('transports', []) or []:
                             if t.get('name') == pname and t.get('type') == 'serial':
@@ -102,10 +108,20 @@ def start_gcs_heartbeat(cfg: dict, ports: Dict[str, Dict], router):
                         if is_serial:
                             try:
                                 ports[pname]['out_q'].put((None, hb))
+                                if debug:
+                                    try:
+                                        print(f"[gcs_heartbeat] enqueued HEARTBEAT to serial port {pname} (dest=None)")
+                                    except Exception:
+                                        pass
                             except Exception:
                                 pass
                         else:
                             # skip unknown/unresolved UDP listeners with no last_addr
+                            if debug:
+                                try:
+                                    print(f"[gcs_heartbeat] skipping UDP port {pname} (no last_addr and not an endpoint)")
+                                except Exception:
+                                    pass
                             continue
                     else:
                         # dest is (host,port)
@@ -113,13 +129,23 @@ def start_gcs_heartbeat(cfg: dict, ports: Dict[str, Dict], router):
                             ports[pname]['out_q'].put(((dest[0], int(dest[1])), hb))
                             if debug:
                                 try:
-                                    print(f"[gcs_heartbeat] enqueued heartbeat to {pname} -> {dest}")
+                                    print(f"[gcs_heartbeat] enqueued HEARTBEAT to {pname} -> {dest}")
                                 except Exception:
                                     pass
                         except Exception:
+                            if debug:
+                                try:
+                                    print(f"[gcs_heartbeat] failed to enqueue HEARTBEAT to {pname} -> {dest}")
+                                except Exception:
+                                    pass
                             pass
                 except Exception:
                     # per-port failures ignored for robustness
+                    if debug:
+                        try:
+                            print(f"[gcs_heartbeat] unexpected error while handling port {pname}")
+                        except Exception:
+                            pass
                     continue
 
             # sleep until next heartbeat

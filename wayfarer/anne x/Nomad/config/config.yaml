@@ -10,6 +10,10 @@ transports:
     name: udp_QGC
     host: 127.0.0.1
     port: 14551
+  - type: udp
+    name: udp_test
+    host: 0.0.0.0
+    port: 14550
   - type: serial
     name: serial_cu_usbmodem01
     device: /dev/cu.usbmodem01
@@ -19,16 +23,28 @@ transports:
 groups:
   alpha:
     launch_delay_s: 5
-    # drones now reference named endpoints defined in the `endpoints` section below
     drones:
       1: drone_alpha_1
       2: drone_alpha_2
+  bravo:
+    launch_delay_s: 5
+    drones:
+      2: drone_bravo_2
+      3: drone_bravo_3
+  charlie:
+    launch_delay_s: 5
+    drones:
+      4: drone_charlie_4
+      5: drone_charlie_5
 
 # endpoints: canonical mapping of logical endpoint names to URIs
-# Use these names in `groups.<group>.drones` instead of raw URIs to avoid duplication.
 endpoints:
   drone_alpha_1: udp://127.0.0.1:14560
   drone_alpha_2: udp://127.0.0.1:14561
+  drone_bravo_2: udp://127.0.0.1:14562
+  drone_bravo_3: udp://127.0.0.1:14563
+  drone_charlie_4: udp://127.0.0.1:14564
+  drone_charlie_5: udp://127.0.0.1:14565
 
 # forwarding rules: forward everything based on PORTS (port-centric)
 # For observability we enqueue into transports (to_port) so the router + mqtt
@@ -39,5 +55,15 @@ forwards:
     to:
       - type: to_port
         port_name: drone_alpha_1
+      - type: to_port
+        port_name: drone_alpha_2
+      - type: to_port
+        port_name: drone_bravo_2
+      - type: to_port
+        port_name: drone_bravo_3
+      - type: to_port
+        port_name: drone_charlie_4
+      - type: to_port
+        port_name: drone_charlie_5
       - type: to_port
         port_name: udp_QGC

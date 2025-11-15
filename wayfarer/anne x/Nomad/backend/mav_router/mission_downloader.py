@@ -21,6 +21,7 @@ class MissionDownloader:
     def download_mission(self, target_sys: int = 1, target_comp: int = 1, timeout: float = 30.0) -> List[Dict[str, Any]]:
         # request mission list
         try:
+            print(f"[MissionDownloader] sending MISSION_REQUEST_LIST to {target_sys}/{target_comp}")
             self.conn.mav.mission_request_list_send(target_sys, target_comp)
         except Exception as e:
             raise MissionDownloadError(f"failed to send MISSION_REQUEST_LIST: {e}")
@@ -41,20 +42,24 @@ class MissionDownloader:
             mtype = getattr(msg, "get_type", lambda: getattr(msg, "type", None))()
             if isinstance(mtype, str) and mtype.upper() in ("MISSION_COUNT", "MISSION_COUNT_INT"):
                 count = int(getattr(msg, "count", 0))
+                print(f"[MissionDownloader] received MISSION_COUNT={count} from {getattr(msg, 'srcSystem', target_sys)}/{getattr(msg, 'srcComponent', target_comp)}")
                 if count == 0:
                     return []
                 # request first item; prefer INT request
                 try:
                     try:
+                        print(f"[MissionDownloader] requesting mission item seq=0 (INT preferred)")
                         self.conn.mav.mission_request_int_send(target_sys, target_comp, 0)
                     except Exception:
                         # fallback to non-INT request
+                        print(f"[MissionDownloader] INT request failed, requesting mission item seq=0 (non-INT)")
                         self.conn.mav.mission_request_send(target_sys, target_comp, 0)
                 except Exception as e:
                     raise MissionDownloadError(f"failed to request first mission item: {e}")
 
             elif isinstance(mtype, str) and mtype.upper() in ("MISSION_ITEM_INT", "MISSION_ITEM"):
                 seq = int(getattr(msg, "seq", 0))
+                print(f"[MissionDownloader] received MISSION_ITEM seq={seq}")
                 items[seq] = msg
                 # if we have all items, return reconstructed list
                 if count is not None and len(items) >= count:
@@ -84,8 +89,10 @@ class MissionDownloader:
                     next_seq = seq + 1
                     try:
                         try:
+                            print(f"[MissionDownloader] requesting next mission item seq={next_seq} (INT preferred)")
                             self.conn.mav.mission_request_int_send(target_sys, target_comp, next_seq)
                         except Exception:
+                            print(f"[MissionDownloader] INT request failed, requesting next mission item seq={next_seq} (non-INT)")
                             self.conn.mav.mission_request_send(target_sys, target_comp, next_seq)
                     except Exception:
                         pass

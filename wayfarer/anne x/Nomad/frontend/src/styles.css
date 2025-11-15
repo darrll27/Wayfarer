@@ -1,3 +1,11 @@
 body { margin: 0; background: #071427; color: #e6eef6 }
 h1 { margin: 0; }
 h2 { margin: 0 0 8px 0 }
+
+/* Flight path arrow styling */
+.flight-arrow {
+  color: #ff4444;
+  font-size: 12px;
+  font-weight: bold;
+  text-shadow: 1px 1px 1px rgba(0,0,0,0.5);
+}

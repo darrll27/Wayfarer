@@ -44,6 +44,7 @@ What exists now (technical)
 - Frontend: a small React/Vite demo lives in `frontend/`. It connects via MQTT (ws) to the local Aedes broker and subscribes to a handful of topics.
 - Backend: Python services under `backend/` implementing a MAVLink router skeleton, transports (UDP/Serial), MQTT adapter bridge, MAVLink encoder helpers, GCS heartbeat generator, and a waypoint validator skeleton.
 - Broker: Aedes server used for local dev (TCP+WebSocket), invoked via helper scripts in `frontend/`.
+- Waypoint files: Group-based drone waypoints in `missions/{mission_name}/{group_name}/{sysid}_waypoints.yaml`, with NATO group names (alpha, bravo, charlie) and 6 drones total (alpha:1,2; bravo:2,3; charlie:4,5).
 
 What works (high level)
 -----------------------
@@ -69,6 +70,7 @@ Known issues and troubleshooting hints
 - Duplicate router starts: in dev, running uvicorn with `--reload` while also spawning the router caused duplicate router processes; orchestrator scripts now avoid `--reload`.
 - Router state machine: the mission upload state machine is not fully implemented (MISSION_COUNT → MISSION_ITEM_INT → verification).
 
+
 Files of interest
 -----------------
 - `backend/mav_router/router.py` — routing & dedupe logic
@@ -84,6 +86,7 @@ Prioritized Next Steps (actionable roadmap)
 The list below is ordered by impact: short quick wins first, then stability/features, then medium-term polish and packaging.
 
 Immediate (next 1–3 days)
+- **✅ Fix frontend 404 on waypoint "Show" button**: Updated backend FastAPI route to use `{filename:path}` converter to allow `/` characters in path parameters, allowing direct use of relative file paths like `demo/alpha/1_waypoints.yaml`. This resolves the 404 when clicking "Show" for demo mission files.
 - Fix the demo button handler in `frontend/src/App.jsx` to prevent the runtime error (change `sendMissionTest` → `sendLoadWaypointsDemo` or rename consistently). Low risk, quick win.
 - Add a visible broker/backend status banner in the UI showing: broker reachability (ws/tcp), API `/api/status` health, and router_running. When unreachable, disable GCS/drone controls and show a clear action button (Retry / Open docs).
 - Make `nomad/status` publishing a visible heartbeat in the UI (small status tile) so the user sees the system is alive.
@@ -114,8 +117,10 @@ How I validated this update
 - I read `instructions.md` (topic schema and contracts) and reviewed the current `project_status.readme.md` content. The Next Steps above derive from the repository state and the constraints written in `instructions.md`.
 
 If you want, next I can:
-- Apply the one-line frontend fix for the broken demo button and run a quick smoke test locally.
-- Create the minimal smoke/integration test harness to catch regressions on heartbeat → MQTT publish.
+- Apply the frontend to check waypoints from config file 
+- frontend can check waypoints from vehicles over mavlink (MQTT)
+- run upload and download of waypoints (happens on backend).
+- Create the complete end to end
 
 End of status
 ```

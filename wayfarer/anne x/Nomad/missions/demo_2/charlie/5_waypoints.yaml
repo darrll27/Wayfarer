@@ -1,0 +1,21 @@
+waypoints:
+  - lat: 37.4150
+    lon: -121.9980
+    alt: 55
+    frame: 6  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    action: "takeoff"
+  - lat: 37.4155
+    lon: -121.9982
+    alt: 60
+    frame: 6  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    action: "waypoint"
+  - lat: 37.4160
+    lon: -121.9984
+    alt: 58
+    frame: 6  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    action: "waypoint"
+  - lat: 37.4165
+    lon: -121.9986
+    alt: 53
+    frame: 6  # MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    action: "land"

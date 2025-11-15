@@ -1,9 +1,10 @@
 Test: test_mission_upload_download_serial
-Timestamp (UTC): 2025-11-13T16:35:09Z
-Status: SKIPPED
+Timestamp (UTC): 2025-11-15T04:52:30Z
+Status: PASS
+Duration: 0.208 s
 
 Details:
-RUN_HIL not set; set RUN_HIL=1 to enable HIL tests
+mission_hash=3ae876355d3efcb204261856f9c5fbad2c2167caa78205c44208b484c129ad98
 
 
 Generated-by: hil_sil_tests.reporter

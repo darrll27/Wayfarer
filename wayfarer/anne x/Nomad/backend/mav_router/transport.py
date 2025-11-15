@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import socket
 import time
-from multiprocessing import Process, Queue
+import threading
+from multiprocessing import Queue
 from typing import Tuple, Optional
 
 try:
@@ -75,19 +76,20 @@ class UDPPort:
         self.bind = (host, port)
         self.router_in_q = router_in_q
         self.out_q: Queue = Queue()
-        self.process: Optional[Process] = None
+        self.thread: Optional[threading.Thread] = None
         self.mqtt_pub_q = mqtt_pub_q
 
     def start(self):
-        self.process = Process(target=udp_port_process, args=(self.name, self.bind, self.router_in_q, self.out_q, self.mqtt_pub_q))
-        self.process.daemon = True
-        self.process.start()
-        return self.process
+        self.thread = threading.Thread(target=udp_port_process, args=(self.name, self.bind, self.router_in_q, self.out_q, self.mqtt_pub_q))
+        self.thread.daemon = True
+        self.thread.start()
+        return self.thread
 
     def stop(self):
-        if self.process is not None:
-            self.process.terminate()
-            self.process.join(timeout=1)
+        if self.thread is not None:
+            # For threads, we can't "terminate" like processes, but we can set a flag or just let it finish
+            # Since these are daemon threads, they'll be cleaned up when the main process exits
+            pass
 
 
 def serial_port_process(name: str, device: str, baud: int, router_in_q: Queue, port_out_q: Queue, mqtt_pub_q: Optional[Queue] = None, read_size: int = 1024):
@@ -101,17 +103,17 @@ def serial_port_process(name: str, device: str, baud: int, router_in_q: Queue, p
         return
 
     ser = None
+    consecutive_errors = 0
+    max_consecutive_errors = 5  # Only reopen after multiple consecutive errors
+
     while True:
         try:
-            ser = serial.Serial(device, baudrate=baud, timeout=0.5)
-            print(f"[transport:{name}] opened serial {device} @ {baud}")
-            break
-        except Exception as e:
-            print(f"[transport:{name}] failed to open {device}: {e}; retrying in 2s")
-            time.sleep(2.0)
+            if ser is None:
+                ser = serial.Serial(device, baudrate=baud, timeout=0.1)  # Shorter timeout
+                print(f"[transport:{name}] opened serial {device} @ {baud}")
+                consecutive_errors = 0
 
-    try:
-        while True:
+            # Try to read data
             try:
                 data = ser.read(read_size)
                 if data:
@@ -121,21 +123,22 @@ def serial_port_process(name: str, device: str, baud: int, router_in_q: Queue, p
                             mqtt_pub_q.put_nowait((name, ("serial", device), data))
                         except Exception:
                             pass
-            except Exception:
-                # read error: try to reopen
-                try:
-                    ser.close()
-                except Exception:
+                    consecutive_errors = 0  # Reset error count on successful read
+                else:
+                    # No data read, but that's normal - don't count as error
                     pass
-                ser = None
-                while True:
+            except Exception as e:
+                consecutive_errors += 1
+                print(f"[transport:{name}] read error (#{consecutive_errors}): {e}")
+                if consecutive_errors >= max_consecutive_errors:
+                    print(f"[transport:{name}] too many consecutive errors, reopening serial port")
                     try:
-                        ser = serial.Serial(device, baudrate=baud, timeout=0.5)
-                        print(f"[transport:{name}] reopened serial {device}")
-                        break
-                    except Exception as e:
-                        print(f"[transport:{name}] reopen failed: {e}; retrying in 2s")
-                        time.sleep(2.0)
+                        ser.close()
+                    except Exception:
+                        pass
+                    ser = None
+                    time.sleep(1.0)  # Wait before reopening
+                    continue
 
             # handle outbound queue
             try:
@@ -143,21 +146,36 @@ def serial_port_process(name: str, device: str, baud: int, router_in_q: Queue, p
                     _, outb = port_out_q.get_nowait()
                     try:
                         ser.write(outb)
-                    except Exception:
-                        # drop and attempt reopen next loop
-                        break
+                    except Exception as e:
+                        print(f"[transport:{name}] write error: {e}")
+                        consecutive_errors += 1
+                        if consecutive_errors >= max_consecutive_errors:
+                            try:
+                                ser.close()
+                            except Exception:
+                                pass
+                            ser = None
+                            break
             except Exception:
                 pass
 
             time.sleep(0.001)
-    except KeyboardInterrupt:
-        print(f"[transport:{name}] stopping serial port")
-    finally:
-        try:
+        except Exception as e:
+            print(f"[transport:{name}] serial port error: {e}")
             if ser is not None:
-                ser.close()
-        except Exception:
-            pass
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                ser = None
+            time.sleep(2.0)  # Wait before retrying
+
+    # Cleanup
+    try:
+        if ser is not None:
+            ser.close()
+    except Exception:
+        pass
 
 
 class SerialPort:
@@ -167,19 +185,20 @@ class SerialPort:
         self.baud = baud
         self.router_in_q = router_in_q
         self.out_q: Queue = Queue()
-        self.process: Optional[Process] = None
+        self.thread: Optional[threading.Thread] = None
         self.mqtt_pub_q = mqtt_pub_q
 
     def start(self):
-        self.process = Process(target=serial_port_process, args=(self.name, self.device, self.baud, self.router_in_q, self.out_q, self.mqtt_pub_q))
-        self.process.daemon = True
-        self.process.start()
-        return self.process
+        self.thread = threading.Thread(target=serial_port_process, args=(self.name, self.device, self.baud, self.router_in_q, self.out_q, self.mqtt_pub_q))
+        self.thread.daemon = True
+        self.thread.start()
+        return self.thread
 
     def stop(self):
-        if self.process is not None:
-            self.process.terminate()
-            self.process.join(timeout=1)
+        if self.thread is not None:
+            # For threads, we can't "terminate" like processes, but we can set a flag or just let it finish
+            # Since these are daemon threads, they'll be cleaned up when the main process exits
+            pass
 
 
 __all__ = ["udp_port_process", "UDPPort", "serial_port_process", "SerialPort"]

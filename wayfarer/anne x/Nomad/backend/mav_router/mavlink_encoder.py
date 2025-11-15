@@ -45,6 +45,17 @@ def _make_mavlink_writer(src_sys: int | None = None, src_comp: int | None = None
             setattr(mav, "mavlink20", True)
         except Exception:
             pass
+    # Set source system/component if provided
+    if src_sys is not None:
+        try:
+            setattr(mav, 'srcSystem', int(src_sys))
+        except Exception:
+            pass
+    if src_comp is not None:
+        try:
+            setattr(mav, 'srcComponent', int(src_comp))
+        except Exception:
+            pass
     return mav, buf
 
 
@@ -83,13 +94,14 @@ def encode_heartbeat(src_sys: int, src_comp: int, mav_type: int = None, autopilo
     return buf.getvalue()
 
 
-def encode_command_long(target_sys: int, target_comp: int, command: int, params: Sequence[float] | None = None, confirmation: int = 0) -> bytes:
+def encode_command_long(target_sys: int, target_comp: int, command: int, params: Sequence[float] | None = None, confirmation: int = 0, src_sys: int = 255, src_comp: int = 1) -> bytes:
     """Encode a COMMAND_LONG message as packed MAVLink bytes.
 
     - target_sys, target_comp: destination
     - command: numeric MAV_CMD value
     - params: sequence of up to 7 float parameters (missing values default to 0)
     - confirmation: usually 0
+    - src_sys, src_comp: source system/component (defaults to GCS: 250/1)
 
     Returns packed bytes suitable for sending over a MAVLink wire.
     """
@@ -98,7 +110,7 @@ def encode_command_long(target_sys: int, target_comp: int, command: int, params:
     # normalize to 7 params
     p = list(params)[:7] + [0.0] * max(0, 7 - len(params))
 
-    mav, buf = _make_mavlink_writer()
+    mav, buf = _make_mavlink_writer(src_sys, src_comp)
     # build message
     try:
         msg = mav.command_long_encode(
@@ -122,17 +134,40 @@ def encode_command_long(target_sys: int, target_comp: int, command: int, params:
     return buf.getvalue()
 
 
-def encode_mission_item_int(target_sys: int, target_comp: int, seq: int, frame: int, command: int, current: int = 0, autocontinue: int = 1, params: Sequence[float] | None = None, x: int = 0, y: int = 0, z: float = 0.0) -> bytes:
+def encode_mission_count(target_sys: int, target_comp: int, count: int, mission_type: int = 0, src_sys: int = 255, src_comp: int = 1) -> bytes:
+    """Encode a MISSION_COUNT message.
+
+    - target_sys, target_comp: destination
+    - count: number of mission items
+    - mission_type: 0 for mission, 1 for fence, 2 for rally (if supported)
+    - src_sys, src_comp: source system/component (defaults to GCS: 250/1)
+    """
+    mav, buf = _make_mavlink_writer(src_sys, src_comp)
+    try:
+        msg = mav.mission_count_encode(
+            target_sys,
+            target_comp,
+            int(count),
+        )
+    except Exception as e:
+        raise RuntimeError(f"failed to encode MISSION_COUNT: {e}") from e
+
+    mav.send(msg)
+    return buf.getvalue()
+
+
+def encode_mission_item_int(target_sys: int, target_comp: int, seq: int, frame: int, command: int, current: int = 0, autocontinue: int = 1, params: Sequence[float] | None = None, x: int = 0, y: int = 0, z: float = 0.0, src_sys: int = 255, src_comp: int = 1) -> bytes:
     """Encode a MISSION_ITEM_INT message (minimal required fields).
 
     This produces the packed MAVLink bytes for MISSION_ITEM_INT. The
     `params` sequence fills param1..param4 and defaults to zero if missing.
+    - src_sys, src_comp: source system/component (defaults to GCS: 250/1)
     """
     if params is None:
         params = []
     p = list(params)[:4] + [0.0] * max(0, 4 - len(params))
 
-    mav, buf = _make_mavlink_writer()
+    mav, buf = _make_mavlink_writer(src_sys, src_comp)
     try:
         msg = mav.mission_item_int_encode(
             target_sys,
@@ -157,4 +192,42 @@ def encode_mission_item_int(target_sys: int, target_comp: int, seq: int, frame: 
     return buf.getvalue()
 
 
-__all__ = ["is_mavlink2_packet", "encode_heartbeat", "encode_command_long", "encode_mission_item_int"]
+def encode_mission_request_list(target_sys: int, target_comp: int, mission_type: int = 0, src_sys: int = 255, src_comp: int = 1) -> bytes:
+    """Encode MISSION_REQUEST_LIST message."""
+    try:
+        mav, buf = _make_mavlink_writer(src_sys, src_comp)
+        # pymavlink's mission_request_list_encode typically expects only
+        # target_system and target_component (mission_type isn't part of
+        # older pymavlink signatures). Call the two-arg form for maximum
+        # compatibility.
+        try:
+            msg = mav.mission_request_list_encode(target_sys, target_comp)
+        except TypeError:
+            # fallback: if the implementation accepts mission_type, use it
+            msg = mav.mission_request_list_encode(target_sys, target_comp, mission_type)
+    except Exception as e:
+        raise RuntimeError(f"failed to encode MISSION_REQUEST_LIST: {e}") from e
+
+    mav.send(msg)
+    return buf.getvalue()
+
+
+def encode_mission_request_int(target_sys: int, target_comp: int, seq: int, mission_type: int = 0, src_sys: int = 255, src_comp: int = 1) -> bytes:
+    """Encode MISSION_REQUEST_INT message."""
+    try:
+        mav, buf = _make_mavlink_writer(src_sys, src_comp)
+        # mission_request_int_encode historically takes (target_sys, target_comp, seq)
+        # newer versions may accept mission_type as a fourth argument; try the
+        # 3-arg form first and fall back to 4-arg if needed.
+        try:
+            msg = mav.mission_request_int_encode(target_sys, target_comp, seq)
+        except TypeError:
+            msg = mav.mission_request_int_encode(target_sys, target_comp, seq, mission_type)
+    except Exception as e:
+        raise RuntimeError(f"failed to encode MISSION_REQUEST_INT: {e}") from e
+
+    mav.send(msg)
+    return buf.getvalue()
+
+
+__all__ = ["is_mavlink2_packet", "encode_heartbeat", "encode_command_long", "encode_mission_count", "encode_mission_item_int", "encode_mission_request_list", "encode_mission_request_int"]

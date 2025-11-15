@@ -9,3 +9,4 @@ pymavlink
 pytest
 pyserial
 paho-mqtt
+httpx

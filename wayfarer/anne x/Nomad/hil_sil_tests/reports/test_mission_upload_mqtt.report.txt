@@ -1,0 +1,10 @@
+Test: test_mission_upload_mqtt
+Timestamp (UTC): 2025-11-15T04:52:19Z
+Status: FAIL
+Duration: 0.009 s
+
+Details:
+[Errno 61] Connection refused
+
+
+Generated-by: hil_sil_tests.reporter

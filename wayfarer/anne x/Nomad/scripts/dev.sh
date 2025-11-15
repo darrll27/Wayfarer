@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Simple dev orchestrator for macOS (zsh/bash).
 # Starts backend FastAPI, Aedes broker (frontend script), and the frontend dev server.
-# Usage: ./scripts/dev.sh [desktop]
+# Usage: ./scripts/dev.sh [desktop|backend-only]
 
 set -euo pipefail
 
@@ -9,8 +9,11 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 
 DESKTOP_MODE=false
+BACKEND_ONLY=false
 if [[ ${1-} == "desktop" ]]; then
   DESKTOP_MODE=true
+elif [[ ${1-} == "backend-only" ]]; then
+  BACKEND_ONLY=true
 fi
 
 PIDS=()
@@ -36,7 +39,11 @@ cd "$FRONTEND_DIR"
 node scripts/aedes_server.js &
 PIDS+=("$!")
 
-if [ "$DESKTOP_MODE" = true ]; then
+if [ "$BACKEND_ONLY" = true ]; then
+  echo "Backend-only mode: started backend and broker, waiting..."
+  # Wait indefinitely
+  wait
+elif [ "$DESKTOP_MODE" = true ]; then
   echo "Starting frontend (desktop mode) — this will run vite and electron"
   npm run dev:desktop
 else

@@ -5,8 +5,17 @@ in the main process. This is a lightweight development harness.
 """
 from __future__ import annotations
 
+import sys
+import os
+from pathlib import Path
+
+# Add the repository root to Python path so backend modules can be imported
+repo_root = Path(__file__).resolve().parents[2]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 import time
-from multiprocessing import Queue
+from multiprocessing import Queue, set_start_method
 from backend.mav_router.transport import UDPPort, SerialPort
 from backend.mav_router.router import Router
 from backend.mav_router.mqtt_adapter import MQTTAdapter
@@ -16,6 +25,14 @@ from pathlib import Path
 
 
 def main():
+    # Set multiprocessing start method to 'fork' for macOS compatibility
+    # This must be called before any multiprocessing objects are created
+    try:
+        set_start_method('fork', force=True)
+    except RuntimeError:
+        # Start method already set
+        pass
+    
     # central inbound queue that transports will push into
     router_in_q: Queue = Queue()
     # queue for transports to also publish raw packets to MQTT
@@ -65,27 +82,13 @@ def main():
     forwards = cfg.get("forwards", [])
     verbose = bool(cfg.get("verbose", False))
 
-    # Optionally create local UDP transports for endpoints that look local (loopback)
+    # NOTE: We no longer automatically create local UDP transports for endpoints.
+    # Endpoints are destinations for forwarding, not sources of data.
+    # Only transports explicitly defined in the 'transports' section should be created.
+    # This prevents port binding conflicts when multiple endpoints point to the same host:port.
+
+    # Load endpoints for summary display
     endpoints = cfg.get("endpoints", {}) or {}
-    for name, uri in endpoints.items():
-        parsed = parse_endpoint_uri(uri)
-        if not parsed:
-            continue
-        host = parsed.get("host")
-        port = parsed.get("port")
-        # create a local listener transport if endpoint is on localhost and not already present
-        if host in ("127.0.0.1", "0.0.0.0", "localhost"):
-            ep_name = name
-            if ep_name not in ports:
-                # bind to the host:port so other local apps can connect
-                try:
-                    print(f"[run_router] creating local endpoint transport {ep_name} -> {host}:{port}")
-                except Exception:
-                    pass
-                udp = UDPPort(ep_name, host, port, router_in_q, mqtt_pub_q=mqtt_pub_q)
-                udp.start()
-                udp_objects[ep_name] = udp
-                ports[ep_name] = {"out_q": udp.out_q}
 
     # resolve forwards entries: allow 'to' items to reference endpoint names
     resolved_forwards = []
@@ -131,11 +134,16 @@ def main():
         pass
 
     # start MQTT adapter (optional) to bridge transports<->broker
+    print("[run_router] initializing MQTT adapter...")
     mqtt_adapter = MQTTAdapter(cfg, ports, router, mqtt_pub_q)
+    print("[run_router] MQTT adapter created, starting...")
     try:
         mqtt_adapter.start()
+        print("[run_router] MQTT adapter started successfully")
     except Exception as e:
-        print("[run_router] MQTT adapter failed to start:", e)
+        print(f"[run_router] MQTT adapter failed to start: {e}")
+        import traceback
+        traceback.print_exc()
 
     # start an internal GCS heartbeat generator (1 Hz) that injects a HEARTBEAT
     # into transports/endpoints so UIs and devices can observe the GCS presence.

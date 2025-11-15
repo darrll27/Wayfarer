@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "sh ./scripts/dev.sh",
     "dev:desktop": "sh ./scripts/dev.sh desktop",
-    "backend": "uvicorn backend.config_api:app --reload --port 8000"
+    "backend": "uvicorn backend.config_api:app --reload --port 8000",
+    "backend+broker": "sh ./scripts/dev.sh backend-only"
   }
 }

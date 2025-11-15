@@ -32,6 +32,7 @@ class MissionUploader:
         count = len(mission)
         # send MISSION_COUNT to vehicle
         try:
+            print(f"[MissionUploader] sending MISSION_COUNT={count} to {target_sys}/{target_comp}")
             self.conn.mav.mission_count_send(target_sys, target_comp, count)
         except Exception as e:
             raise MissionUploadError(f"failed to send MISSION_COUNT: {e}")
@@ -53,6 +54,7 @@ class MissionUploader:
             if isinstance(mtype, str) and mtype.upper() in ("MISSION_REQUEST", "MISSION_REQUEST_INT"):
                 # both MISSION_REQUEST and MISSION_REQUEST_INT include 'seq'
                 seq = int(getattr(msg, "seq", getattr(msg, "param1", 0)))
+                print(f"[MissionUploader] received MISSION_REQUEST for seq={seq}")
                 if seq < 0 or seq >= count:
                     raise MissionUploadError(f"vehicle requested invalid seq {seq}")
 
@@ -81,12 +83,14 @@ class MissionUploader:
                         float(z),
                     )
                     sent[seq] = True
+                    print(f"[MissionUploader] sent MISSION_ITEM_INT seq={seq} to {target_sys}/{target_comp}")
                 except Exception as e:
                     raise MissionUploadError(f"failed to send MISSION_ITEM_INT seq={seq}: {e}")
             else:
                 # MISSION_ACK
                 if isinstance(mtype, str) and mtype.upper() == "MISSION_ACK":
                     # success
+                    print(f"[MissionUploader] received MISSION_ACK from {getattr(msg, 'srcSystem', target_sys)}/{getattr(msg, 'srcComponent', target_comp)}")
                     return True
                 # unknown message type: ignore
 
