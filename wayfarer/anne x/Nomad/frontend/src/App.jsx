@@ -1,9 +1,35 @@
-import React, {useEffect, useState, useRef} from 'react'
+import React, {useEffect, useState, useRef, useMemo} from 'react'
 
 // Decide at runtime whether we're in Electron (renderer) or a browser dev server.
 // Electron renderer can use the Node mqtt client to connect to tcp://localhost:1883.
 // Browser dev (Vite) must use the websocket bridge at ws://localhost:1884.
 const isElectron = typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Electron') || (typeof window !== 'undefined' && window.process && window.process.versions && window.process.versions.electron)
+
+const WORKSPACES = [
+  {id: 'overview', label: 'Overview'},
+  {id: 'fleet', label: 'Fleet Map'},
+  {id: 'bird', label: 'Bird Detail'},
+  {id: 'qgc', label: 'QGC Panel'},
+  {id: 'missions', label: 'Missions'},
+  {id: 'logs', label: 'Logs'},
+  {id: 'settings', label: 'Settings'}
+]
+
+function Panel({title, actions, children, className = ''}) {
+  return (
+    <div className={`panel ${className}`}>
+      <div className="panel-header">
+        <div className="panel-title">{title}</div>
+        {actions ? <div className="panel-actions">{actions}</div> : null}
+      </div>
+      <div className="panel-body">{children}</div>
+    </div>
+  )
+}
+
+function Badge({label, tone = 'neutral'}) {
+  return <span className={`badge badge-${tone}`}>{label}</span>
+}
 
 export default function App() {
   const [connStatus, setConnStatus] = useState('disconnected')
@@ -14,14 +40,24 @@ export default function App() {
   const [brokerMissing, setBrokerMissing] = useState(false)
   const [brokerError, setBrokerError] = useState(null)
   const [brokerStatus, setBrokerStatus] = useState(null)
-  const [page, setPage] = useState('telemetry')
+  const [workspace, setWorkspace] = useState('overview')
   const [wpFiles, setWpFiles] = useState([])
   const [selectedMission, setSelectedMission] = useState('')
   const [downloadedMissions, setDownloadedMissions] = useState([])
   const [downloadSysid, setDownloadSysid] = useState(1)
   const [downloadCompid, setDownloadCompid] = useState(1)
+  const [birdFilter, setBirdFilter] = useState('')
+  const [selectedBird, setSelectedBird] = useState(null)
+  const [logFilter, setLogFilter] = useState('')
+  const [selectedMode, setSelectedMode] = useState('AUTO')
+  const [armReady, setArmReady] = useState(false)
+  const [mapScope, setMapScope] = useState('all')
 
   const clientRef = useRef(null)
+  const mapRef = useRef(null)
+  const mapLayersRef = useRef([])
+  const qgcMapRef = useRef(null)
+  const qgcMapLayersRef = useRef([])
 
   // fetch broker status when config is available
   useEffect(() => {
@@ -120,13 +156,13 @@ export default function App() {
         if (topic.startsWith('Nomad/missions/downloaded/')) {
           try {
             const obj = JSON.parse(msg)
-            setDownloadedMissions((prev) => [obj].concat(prev).slice(0, 10)) // keep last 10
+            setDownloadedMissions((prev) => [obj].concat(prev).slice(0, 10))
             addToast({title: 'Mission downloaded', body: `From sysid ${obj.sysid}: ${obj.count} waypoints`})
           } catch (e) {
             addToast({title: 'Mission download', body: msg})
           }
         }
-        setTelemetry((s) => [{topic, msg, ts: Date.now()}].concat(s).slice(0, 50))
+        setTelemetry((s) => [{topic, msg, ts: Date.now()}].concat(s).slice(0, 160))
       })
 
       client.on('reconnect', () => setConnStatus('reconnecting'))
@@ -208,13 +244,13 @@ export default function App() {
           if (topic.startsWith('Nomad/missions/downloaded/')) {
             try {
               const obj = JSON.parse(msg)
-              setDownloadedMissions((prev) => [obj].concat(prev).slice(0, 10)) // keep last 10
+              setDownloadedMissions((prev) => [obj].concat(prev).slice(0, 10))
               addToast({title: 'Mission downloaded', body: `From sysid ${obj.sysid}: ${obj.count} waypoints`})
             } catch (e) {
               addToast({title: 'Mission download', body: msg})
             }
           }
-          setTelemetry((s) => [{topic, msg, ts: Date.now()}].concat(s).slice(0, 50))
+          setTelemetry((s) => [{topic, msg, ts: Date.now()}].concat(s).slice(0, 160))
         })
 
         client.on('reconnect', () => setConnStatus('reconnecting'))
@@ -254,13 +290,10 @@ export default function App() {
   }
 
   // Waypoint manager state & helpers
-  const [flightPaths, setFlightPaths] = useState({}) // sysid -> array of [lat, lon] positions
   const [showFlightPaths, setShowFlightPaths] = useState(true)
   const [selectedFile, setSelectedFile] = useState(null)
   const [sendSysid, setSendSysid] = useState(1)
   const [sendCompid, setSendCompid] = useState(1)
-  const mapRef = useRef(null)
-  const mapLayersRef = useRef([])
 
   async function loadWaypointFiles() {
     try {
@@ -269,7 +302,7 @@ export default function App() {
       const j = await r.json()
       const files = j.files || []
       setWpFiles(files)
-      
+
       // Set default mission to first available mission if none selected
       if (files.length > 0 && !selectedMission) {
         const missions = Object.keys(groupWaypointFiles(files))
@@ -295,123 +328,320 @@ export default function App() {
     return grouped
   }
 
-  // Extract flight paths from telemetry data
+  const parseDeviceTopic = (topic) => {
+    let match = topic.match(/^device\/(\d+)\/(\d+)\/([^/]+)(?:\/([^/]+))?$/)
+    if (match) {
+      return {sysid: match[1], compid: match[2], msgType: match[3], field: match[4]}
+    }
+    match = topic.match(/^device\/sysid_(\d+)\/compid_(\d+)\/([^/]+)(?:\/([^/]+))?$/)
+    if (match) {
+      return {sysid: match[1], compid: match[2], msgType: match[3], field: match[4]}
+    }
+    return null
+  }
+
+  const birdRecords = useMemo(() => {
+    const map = {}
+    telemetry.forEach(({topic, msg, ts}) => {
+      const parsed = parseDeviceTopic(topic)
+      if (!parsed) return
+      const {sysid, compid, msgType, field} = parsed
+
+      if (!map[sysid]) {
+        map[sysid] = {
+          sysid,
+          compid,
+          lastSeen: ts,
+          lastHeartbeat: 0,
+          topics: new Set(),
+          lat: null,
+          lon: null,
+          lastMessage: null
+        }
+      }
+      const bird = map[sysid]
+      bird.lastSeen = Math.max(bird.lastSeen, ts)
+      bird.topics.add(msgType)
+      bird.lastMessage = {topic, msg, ts}
+
+      if (msgType === 'HEARTBEAT') {
+        bird.lastHeartbeat = Math.max(bird.lastHeartbeat, ts)
+      }
+
+      if (msgType === 'GLOBAL_POSITION_INT' && field) {
+        let value = null
+        try {
+          const parsed = JSON.parse(msg)
+          if (parsed && typeof parsed[field] !== 'undefined') {
+            value = parsed[field]
+          }
+        } catch (e) {
+          const num = Number(msg)
+          if (!Number.isNaN(num)) value = num
+        }
+        if (value !== null) {
+          if (field === 'lat') bird.lat = value / 1e7
+          if (field === 'lon') bird.lon = value / 1e7
+        }
+      }
+    })
+    return map
+  }, [telemetry])
+
+  const birdList = useMemo(() => {
+    const list = Object.values(birdRecords)
+    list.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0))
+    if (!birdFilter) return list
+    const q = birdFilter.toLowerCase()
+    return list.filter(b => String(b.sysid).includes(q) || String(b.compid).includes(q))
+  }, [birdRecords, birdFilter])
+
+  useEffect(() => {
+    if (!selectedBird && birdList.length > 0) {
+      setSelectedBird(birdList[0].sysid)
+    }
+  }, [birdList, selectedBird])
+
+  const selectedBirdRecord = selectedBird ? birdRecords[selectedBird] : null
+  const selectedBirdTelemetry = selectedBird
+    ? telemetry.filter(t => {
+      const parsed = parseDeviceTopic(t.topic)
+      return parsed && String(parsed.sysid) === String(selectedBird)
+    }).slice(0, 80)
+    : []
+
+  const selectedBirdMode = useMemo(() => {
+    if (!selectedBird) return 'unknown'
+    const entry = telemetry.find(t => {
+      const parsed = parseDeviceTopic(t.topic)
+      return parsed && String(parsed.sysid) === String(selectedBird) && parsed.msgType === 'HEARTBEAT'
+    })
+    if (!entry) return 'unknown'
+    try {
+      const parsed = JSON.parse(entry.msg)
+      if (parsed.mode) return String(parsed.mode)
+      if (parsed.custom_mode) return `custom:${parsed.custom_mode}`
+      if (parsed.base_mode) return `base:${parsed.base_mode}`
+    } catch (e) {
+      // ignore
+    }
+    return 'unknown'
+  }, [selectedBird, telemetry])
+
+  const fleetStats = useMemo(() => {
+    const now = Date.now()
+    const all = Object.values(birdRecords)
+    const active = all.filter(b => now - (b.lastSeen || 0) < 10000)
+    return {
+      total: all.length,
+      active: active.length,
+      stale: all.length - active.length
+    }
+  }, [birdRecords])
+
+  const updateQgcMapMarkers = () => {
+    if (!window.L || !qgcMapRef.current) return
+    if (qgcMapLayersRef.current) {
+      qgcMapLayersRef.current.forEach(l => {
+        try { l.remove() } catch (e){}
+      })
+      qgcMapLayersRef.current = []
+    }
+    const birds = mapScope === 'selected' && selectedBirdRecord ? [selectedBirdRecord] : birdList
+    birds.forEach(bird => {
+      if (bird.lat == null || bird.lon == null) return
+      const marker = window.L.circleMarker([bird.lat, bird.lon], {
+        radius: 6,
+        color: '#5eead4',
+        fillColor: '#5eead4',
+        fillOpacity: 0.9
+      }).addTo(qgcMapRef.current)
+      marker.bindTooltip(`Bird ${bird.sysid}`, {permanent: false})
+      qgcMapLayersRef.current.push(marker)
+    })
+  }
+
   const getFlightPaths = () => {
     const paths = {}
     const positions = {}
-    
-    // Collect all GPS positions
     telemetry.forEach(({topic, msg}) => {
       try {
         const latMatch = topic.match(/^device\/(\d+)\/\d+\/GLOBAL_POSITION_INT\/lat$/)
         const lonMatch = topic.match(/^device\/(\d+)\/\d+\/GLOBAL_POSITION_INT\/lon$/)
-        
         if (latMatch) {
           const sysid = latMatch[1]
           if (!positions[sysid]) positions[sysid] = {}
-          positions[sysid].lat = JSON.parse(msg).lat / 1e7
+          const parsed = JSON.parse(msg)
+          const value = parsed && typeof parsed.lat !== 'undefined' ? parsed.lat : Number(msg)
+          if (!Number.isNaN(value)) positions[sysid].lat = value / 1e7
         } else if (lonMatch) {
           const sysid = lonMatch[1]
           if (!positions[sysid]) positions[sysid] = {}
-          positions[sysid].lon = JSON.parse(msg).lon / 1e7
+          const parsed = JSON.parse(msg)
+          const value = parsed && typeof parsed.lon !== 'undefined' ? parsed.lon : Number(msg)
+          if (!Number.isNaN(value)) positions[sysid].lon = value / 1e7
         }
       } catch (e) {
         // ignore parse errors
       }
     })
-    
-    // Convert to path arrays
     Object.entries(positions).forEach(([sysid, pos]) => {
       if (pos.lat !== undefined && pos.lon !== undefined) {
         if (!paths[sysid]) paths[sysid] = []
         paths[sysid].push([pos.lat, pos.lon])
-        // Keep only last 50 positions per drone
         if (paths[sysid].length > 50) paths[sysid].shift()
       }
     })
-    
     return paths
   }
 
-  // Update flight paths on map
+  // initialize map when Missions workspace is opened
+  useEffect(() => {
+    if (workspace !== 'missions') {
+      if (mapRef.current) {
+        mapRef.current.remove()
+        mapRef.current = null
+        mapLayersRef.current = []
+      }
+      return
+    }
+    const setup = () => {
+      if (!window.L) {
+        setTimeout(setup, 200)
+        return
+      }
+      if (mapRef.current) {
+        try {
+          mapRef.current.getCenter()
+          return
+        } catch (e) {
+          mapRef.current = null
+          mapLayersRef.current = []
+        }
+      }
+      const mapContainer = document.getElementById('map')
+      if (!mapContainer) {
+        setTimeout(setup, 200)
+        return
+      }
+      mapRef.current = window.L.map('map', {zoomControl: true}).setView([37.4680, -122.0870], 15)
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(mapRef.current)
+
+      loadWaypointFiles()
+    }
+    setup()
+  }, [workspace])
+
+  useEffect(() => {
+    if (workspace !== 'qgc') {
+      if (qgcMapRef.current) {
+        qgcMapRef.current.remove()
+        qgcMapRef.current = null
+        qgcMapLayersRef.current = []
+      }
+      return
+    }
+    const setup = () => {
+      if (!window.L) {
+        setTimeout(setup, 200)
+        return
+      }
+      if (qgcMapRef.current) {
+        try {
+          qgcMapRef.current.getCenter()
+          return
+        } catch (e) {
+          qgcMapRef.current = null
+          qgcMapLayersRef.current = []
+        }
+      }
+      const mapContainer = document.getElementById('qgc-map')
+      if (!mapContainer) {
+        setTimeout(setup, 200)
+        return
+      }
+      qgcMapRef.current = window.L.map('qgc-map', {zoomControl: true}).setView([37.4680, -122.0870], 14)
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(qgcMapRef.current)
+      updateQgcMapMarkers()
+    }
+    setup()
+  }, [workspace])
+
+  // Update downloaded missions when telemetry or data changes
+  useEffect(() => {
+    if (workspace === 'missions' && mapRef.current) {
+      updateDownloadedMissionsOnMap()
+      updateFlightPathsOnMap()
+    }
+  }, [telemetry, showFlightPaths, downloadedMissions, workspace])
+
+  useEffect(() => {
+    if (workspace === 'qgc' && qgcMapRef.current) {
+      updateQgcMapMarkers()
+    }
+  }, [telemetry, workspace, mapScope, selectedBird, birdList])
+
   const updateFlightPathsOnMap = () => {
-    if (!window.L || !mapRef.current || !showFlightPaths) return
-    
-    // Clear existing flight path layers
+    if (!window.L || !mapRef.current) return
     if (mapLayersRef.current) {
-      mapLayersRef.current.forEach(l => { 
+      mapLayersRef.current.forEach(l => {
         if (l.options && l.options.flightPath) {
-          try { l.remove() } catch (e){} 
+          try { l.remove() } catch (e){}
         }
       })
       mapLayersRef.current = mapLayersRef.current.filter(l => !(l.options && l.options.flightPath))
     }
-    
+    if (!showFlightPaths) return
+
     const paths = getFlightPaths()
     Object.entries(paths).forEach(([sysid, positions]) => {
       if (positions.length > 1) {
-        // Create polyline with arrows
         const polyline = window.L.polyline(positions, {
-          color: '#ff4444',
-          weight: 3,
+          color: '#38bdf8',
+          weight: 2,
           flightPath: true
         }).addTo(mapRef.current)
-        
-        // Add directional arrows
-        for (let i = 0; i < positions.length - 1; i++) {
-          const start = positions[i]
-          const end = positions[i + 1]
-          const angle = Math.atan2(end[1] - start[1], end[0] - start[0]) * 180 / Math.PI
-          
-          // Create arrow marker
-          const arrow = window.L.marker([(start[0] + end[0]) / 2, (start[1] + end[1]) / 2], {
-            icon: window.L.divIcon({
-              html: '▶',
-              className: 'flight-arrow',
-              iconSize: [16, 16],
-              iconAnchor: [8, 8]
-            }),
-            rotationAngle: angle,
-            flightPath: true
-          }).addTo(mapRef.current)
-          
-          mapLayersRef.current.push(arrow)
-        }
-        
         mapLayersRef.current.push(polyline)
+        const last = positions[positions.length - 1]
+        const marker = window.L.circleMarker(last, {
+          radius: 5,
+          color: '#38bdf8',
+          fillColor: '#38bdf8',
+          fillOpacity: 0.8,
+          flightPath: true
+        }).addTo(mapRef.current)
+        marker.bindTooltip(`Sysid ${sysid}`, {permanent: false})
+        mapLayersRef.current.push(marker)
       }
     })
   }
 
-  // Update downloaded missions on map
   const updateDownloadedMissionsOnMap = () => {
     if (!window.L || !mapRef.current) return
-    
-    // Clear existing downloaded mission layers
+
     if (mapLayersRef.current) {
-      mapLayersRef.current.forEach(l => { 
+      mapLayersRef.current.forEach(l => {
         if (l.options && l.options.downloadedMission) {
-          try { l.remove() } catch (e){} 
+          try { l.remove() } catch (e){}
         }
       })
       mapLayersRef.current = mapLayersRef.current.filter(l => !(l.options && l.options.downloadedMission))
     }
-    
-    // Plot downloaded missions
-    downloadedMissions.forEach((mission, missionIdx) => {
+
+    downloadedMissions.forEach((mission) => {
       if (mission.mission && mission.mission.length > 0) {
-        // Convert mission waypoints to lat/lng
-        const latlngs = mission.mission.map(wp => [wp.y / 1e7, wp.x / 1e7]) // MAVLink uses x=east, y=north
-        
-        // Create polyline for downloaded mission path
+        const latlngs = mission.mission.map(wp => [wp.y / 1e7, wp.x / 1e7])
         const polyline = window.L.polyline(latlngs, {
           color: '#ff6600',
           weight: 3,
           opacity: 0.8,
           downloadedMission: true
         }).addTo(mapRef.current)
-        
-        // Add markers for downloaded waypoints
+
         mission.mission.forEach((wp, wpIdx) => {
           const marker = window.L.circleMarker([wp.y / 1e7, wp.x / 1e7], {
             radius: 7,
@@ -420,11 +650,11 @@ export default function App() {
             fillOpacity: 0.7,
             downloadedMission: true
           }).addTo(mapRef.current)
-          
+
           marker.bindTooltip(`${mission.sysid}-${wpIdx + 1}<br/>Sysid ${mission.sysid}<br/>${wp.command || 'waypoint'}`, {permanent: false})
           mapLayersRef.current.push(marker)
         })
-        
+
         mapLayersRef.current.push(polyline)
       }
     })
@@ -437,11 +667,10 @@ export default function App() {
       if (!r.ok) return
       const j = await r.json()
       const w = j.waypoints || []
-      // clear previous planned waypoint layers only
       if (mapLayersRef.current) {
-        mapLayersRef.current.forEach(l => { 
+        mapLayersRef.current.forEach(l => {
           if (l.options && l.options.plannedWaypoint) {
-            try { l.remove() } catch (e){} 
+            try { l.remove() } catch (e){}
           }
         })
         mapLayersRef.current = mapLayersRef.current.filter(l => !(l.options && l.options.plannedWaypoint))
@@ -450,10 +679,9 @@ export default function App() {
       if (latlngs.length === 0) return
       const poly = window.L.polyline(latlngs, {color: '#ff0000', plannedWaypoint: true}).addTo(mapRef.current)
       mapLayersRef.current.push(poly)
-      // add markers for planned waypoints
       w.forEach((pt, i) => {
-        const sysidMatch = filename.match(/^(\d+)_/);
-        const sysid = sysidMatch ? parseInt(sysidMatch[1]) : '?';
+        const sysidMatch = filename.match(/^(\d+)_/)
+        const sysid = sysidMatch ? parseInt(sysidMatch[1]) : '?'
         const m = window.L.circleMarker([pt.lat, pt.lon], {radius: 3, color: '#0b6', plannedWaypoint: true}).addTo(mapRef.current)
         m.bindTooltip(`${sysid}-${i + 1}<br/>${filename}<br/>${pt.action || 'waypoint'}`, {permanent: false})
         mapLayersRef.current.push(m)
@@ -469,7 +697,6 @@ export default function App() {
     const id = Date.now() + Math.random()
     const entry = {...t, id}
     setToasts((s) => [entry].concat(s).slice(0, 6))
-    // auto-remove after 6s
     setTimeout(() => {
       setToasts((s) => s.filter(x => x.id !== id))
     }, 6000)
@@ -498,11 +725,9 @@ export default function App() {
   }
 
   async function downloadFromAllDrones() {
-    // Download missions from drones with sysid 1-6 (typical demo setup)
     for (let sysid = 1; sysid <= 6; sysid++) {
       try {
         await downloadMissionFromDrone({sysid, compid: 1})
-        // Small delay between requests
         await new Promise(resolve => setTimeout(resolve, 100))
       } catch (e) {
         console.error(`Failed to download from sysid ${sysid}:`, e)
@@ -517,82 +742,34 @@ export default function App() {
     await sendToDrone({sysid: sys, compid: comp, filename})
   }
 
-  // initialize map when Waypoints page is opened
-  useEffect(() => {
-    if (page !== 'waypoints') {
-      // Clean up map when leaving waypoints page
-      if (mapRef.current) {
-        mapRef.current.remove()
-        mapRef.current = null
-        mapLayersRef.current = []
-      }
-      return
+  const sendModeCommand = async () => {
+    if (!selectedBird || !clientRef.current) return
+    const sysid = Number(selectedBird)
+    const compid = selectedBirdRecord ? Number(selectedBirdRecord.compid) : 1
+    const payload = {
+      command: 'SET_MODE',
+      mode: selectedMode,
+      params: [],
+      src_sysid: 250,
+      src_compid: 1
     }
-    // ensure leaflet is available
-    const setup = () => {
-      if (!window.L) {
-        // leaflet not loaded yet
-        setTimeout(setup, 200)
-        return
-      }
-      if (mapRef.current) {
-        // Check if map is still valid
-        try {
-          mapRef.current.getCenter()
-          return // map already exists and is valid
-        } catch (e) {
-          // map is invalid, clean up
-          mapRef.current = null
-          mapLayersRef.current = []
-        }
-      }
-      
-      // Check if map container exists
-      const mapContainer = document.getElementById('map')
-      if (!mapContainer) {
-        setTimeout(setup, 200)
-        return
-      }
-      
-      mapRef.current = window.L.map('map', {zoomControl: true}).setView([37.4680, -122.0870], 15)
-      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap contributors'
-      }).addTo(mapRef.current)
-      
-      // Add legend control
-      const legend = window.L.control({position: 'bottomright'})
-      legend.onAdd = function (map) {
-        const div = window.L.DomUtil.create('div', 'info legend')
-        div.style.backgroundColor = 'white'
-        div.style.padding = '8px'
-        div.style.borderRadius = '4px'
-        div.style.border = '1px solid #ccc'
-        div.innerHTML = `
-          <div style="font-weight: bold; margin-bottom: 4px;">Map Legend</div>
-          <div style="display: flex; align-items: center; margin-bottom: 2px;">
-            <div style="width: 10px; height: 10px; border-radius: 50%; background-color: #0b6; margin-right: 8px;"></div>
-            <span>Waypoint (YAML)</span>
-          </div>
-          <div style="display: flex; align-items: center;">
-            <div style="width: 8px; height: 8px; border-radius: 50%; background-color: #ff6600; margin-right: 8px;"></div>
-            <span>Flightpath(onboard)</span>
-          </div>
-        `
-        return div
-      }
-      legend.addTo(mapRef.current)
-      
-      loadWaypointFiles()
-    }
-    setup()
-  }, [page])
+    clientRef.current.publish(`command/${sysid}/${compid}/details`, JSON.stringify(payload))
+    addToast({title: 'Mode sent', body: `Bird ${sysid} -> ${selectedMode}`})
+  }
 
-  // Update downloaded missions when telemetry or data changes
-  useEffect(() => {
-    if (page === 'waypoints' && mapRef.current) {
-      updateDownloadedMissionsOnMap()
+  const sendArmCommand = async (armFlag) => {
+    if (!selectedBird || !clientRef.current) return
+    const sysid = Number(selectedBird)
+    const compid = selectedBirdRecord ? Number(selectedBirdRecord.compid) : 1
+    const payload = {
+      command: 'MAV_CMD_COMPONENT_ARM_DISARM',
+      params: [armFlag ? 1 : 0, 0, 0, 0, 0, 0, 0],
+      src_sysid: 250,
+      src_compid: 1
     }
-  }, [telemetry, showFlightPaths, downloadedMissions, page])
+    clientRef.current.publish(`command/${sysid}/${compid}/details`, JSON.stringify(payload))
+    addToast({title: armFlag ? 'Arm command sent' : 'Disarm command sent', body: `Bird ${sysid}`})
+  }
 
   // Settings: upload / paste waypoint YAML
   async function uploadRawWaypoint(filename, raw) {
@@ -645,336 +822,280 @@ export default function App() {
     }
   }
 
-    return (
-    <div style={{fontFamily: 'Inter, system-ui, sans-serif', padding: 12, display: 'flex', flexDirection: 'column', minHeight: '100vh'}}>
-      <header style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid #e6edf3'}}>
-        <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
-          <h1 style={{margin: 0}}>Nomad</h1>
-          <nav>
-            <button onClick={() => setPage('telemetry')} style={{marginRight: 8}}>Telemetry</button>
-            <button onClick={() => setPage('waypoints')} style={{marginRight: 8}}>Waypoints</button>
-            <button onClick={() => setPage('settings')} style={{marginRight: 8}}>Settings</button>
-          </nav>
+  const filteredTelemetry = logFilter
+    ? telemetry.filter(t => t.topic.toLowerCase().includes(logFilter.toLowerCase()) || t.msg.toLowerCase().includes(logFilter.toLowerCase()))
+    : telemetry
+
+  return (
+    <div className="app">
+      <header className="app-header">
+        <div className="app-title">
+          <div>
+            <div className="title">Nomad</div>
+            <div className="subtitle">Fleet console</div>
+          </div>
+          <div className="status-chips">
+            <Badge label={`MQTT: ${connStatus}`} tone={connStatus === 'connected' ? 'ok' : 'warn'} />
+            <Badge label={`Backend: ${backendStatus && backendStatus.ok ? 'online' : 'unknown'}`} tone={backendStatus && backendStatus.ok ? 'ok' : 'neutral'} />
+          </div>
         </div>
-        <div style={{textAlign: 'right'}}>
-          <div style={{fontSize: 12, color: '#6b7280'}}>Connection: <strong>{connStatus}</strong></div>
-          <div style={{fontSize: 12, color: '#6b7280'}}>{brokerConfig ? `${brokerConfig.host}:${isElectron ? brokerConfig.tcp_port : brokerConfig.ws_port}` : (brokerMissing ? 'no broker config' : 'loading...')}</div>
+        <nav className="tabs">
+          {WORKSPACES.map(tab => (
+            <button
+              key={tab.id}
+              className={`tab ${workspace === tab.id ? 'active' : ''}`}
+              onClick={() => setWorkspace(tab.id)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+        <div className="broker-summary">
+          <div className="label">Broker</div>
+          <div className="value">
+            {brokerConfig ? `${brokerConfig.host}:${isElectron ? brokerConfig.tcp_port : brokerConfig.ws_port}` : (brokerMissing ? 'missing' : 'loading...')}
+          </div>
         </div>
       </header>
 
-      <section style={{marginTop: 16}}>
-        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-          <h2>Live telemetry (most recent)</h2>
-          <div style={{textAlign: 'right'}}>
-            <div style={{fontSize: 12, color: '#94a3b8'}}>Backend status</div>
-            <div style={{fontFamily: 'monospace', fontSize: 13}}>{backendStatus ? JSON.stringify(backendStatus) : 'offline'}</div>
-            <div style={{fontSize: 12, color: '#94a3b8'}}>Broker status</div>
-            <div style={{fontFamily: 'monospace', fontSize: 13}}>{brokerStatus ? JSON.stringify(brokerStatus) : 'unknown'}</div>
-          </div>
-        </div>
-
-        <div style={{marginTop: 12, display: 'flex', gap: 12}}>
-          <button onClick={sendLoadWaypointsDemo} style={{padding: '8px 12px', borderRadius: 6}}>Send demo waypoints (validate)</button>
-        </div>
-        <div style={{maxHeight: 400, overflow: 'auto', background: '#0f172a', color: '#cbd5e1', padding: 8, borderRadius: 6}}>
-          {telemetry.length === 0 ? (
-            <div style={{opacity: 0.6}}>No telemetry received yet.</div>
-          ) : (
-            telemetry.map((t, i) => (
-              <div key={i} style={{padding: '6px 8px', borderBottom: '1px solid rgba(255,255,255,0.03)'}}>
-                <div style={{fontSize: 12, color: '#94a3b8'}}>{new Date(t.ts).toLocaleTimeString()}</div>
-                <div style={{fontFamily: 'monospace', fontSize: 13}}>{t.topic}: {t.msg}</div>
-              </div>
-            ))
-          )}
-        </div>
-      </section>
-
-      {page === 'waypoints' ? (
-        <section style={{marginTop: 16}}>
-          <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-            <h2>Waypoint Manager</h2>
-            <div>
-              <button onClick={async () => { try { await fetch('/api/waypoints/demo', {method: 'POST'}); await loadWaypointFiles() } catch (e) { console.error(e) } }} style={{padding: '6px 8px', marginRight: 8}}>Create demo waypoints (6 drones)</button>
-              <button onClick={loadWaypointFiles} style={{padding: '6px 8px'}}>Refresh</button>
-            </div>
-          </div>
-
-          <div style={{display: 'flex', gap: 12, marginTop: 12}}>
-            <div style={{flex: 1}}>
-              <div id="map" style={{height: 480, borderRadius: 8, overflow: 'hidden', border: '1px solid #e6edf3'}} />
-            </div>
-            <div style={{width: 360}}>
-              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8}}>
-                <h3 style={{margin: 0}}>Map Controls</h3>
-              </div>
-              <div style={{background: '#f8fafc', padding: 8, borderRadius: 6, marginBottom: 12}}>
-                <label style={{display: 'flex', alignItems: 'center', fontSize: 13}}>
-                  <input 
-                    type="checkbox" 
-                    checked={showFlightPaths} 
-                    onChange={(e) => setShowFlightPaths(e.target.checked)} 
-                    style={{marginRight: 8}}
-                  />
-                  Show Flightpath(onboard)
-                </label>
-                <div style={{marginTop: 8}}>
-                  <button onClick={async () => {
-                    // Clear existing layers
-                    if (mapLayersRef.current) {
-                      mapLayersRef.current.forEach(l => { 
-                        if (l.options && (l.options.downloadedMission || l.options.plannedWaypoint)) {
-                          try { l.remove() } catch (e){} 
-                        }
-                      })
-                      mapLayersRef.current = mapLayersRef.current.filter(l => !(l.options && (l.options.downloadedMission || l.options.plannedWaypoint)))
-                    }
-                    
-                    // Filter files by selected mission if one is selected
-                    const filesToShow = selectedMission 
-                      ? wpFiles.filter(f => f.mission_name === selectedMission)
-                      : wpFiles
-                    
-                    // Show planned waypoints
-                    for (const f of filesToShow) {
-                      if (f.valid) {
-                        try {
-                          const r = await fetch(`/api/waypoints/${f.filename}`)
-                          if (r.ok) {
-                            const j = await r.json()
-                            const w = j.waypoints || []
-                            const latlngs = w.map(p => [p.lat, p.lon])
-                            if (latlngs.length > 0) {
-                              const poly = window.L.polyline(latlngs, {color: '#ff0000', plannedWaypoint: true}).addTo(mapRef.current)
-                              mapLayersRef.current.push(poly)
-                              w.forEach((pt, i) => {
-                                const sysidMatch = f.filename.match(/^(\d+)_/);
-                                const sysid = sysidMatch ? parseInt(sysidMatch[1]) : '?';
-                                const m = window.L.circleMarker([pt.lat, pt.lon], {radius: 3, color: '#0b6', plannedWaypoint: true}).addTo(mapRef.current)
-                                m.bindTooltip(`${sysid}-${i + 1}<br/>${f.filename}<br/>${pt.action || 'waypoint'}`, {permanent: false})
-                                mapLayersRef.current.push(m)
-                              })
-                            }
-                          }
-                        } catch (e) {
-                          console.error('Failed to load waypoints for', f.filename, e)
-                        }
-                      }
-                    }
-                    
-                    // Show downloaded missions (filter by mission if selected)
-                    const missionsToShow = selectedMission
-                      ? downloadedMissions // For now, show all downloaded missions since we don't have mission_name in downloaded data
-                      : downloadedMissions
-                    
-                    missionsToShow.forEach((mission) => {
-                      if (mission.mission && mission.mission.length > 0) {
-                        const latlngs = mission.mission.map(wp => [wp.y / 1e7, wp.x / 1e7])
-                        const polyline = window.L.polyline(latlngs, {
-                          color: '#ff6600',
-                          weight: 3,
-                          opacity: 0.8,
-                          downloadedMission: true
-                        }).addTo(mapRef.current)
-                        
-                        mission.mission.forEach((wp, wpIdx) => {
-                          const marker = window.L.circleMarker([wp.y / 1e7, wp.x / 1e7], {
-                            radius: 7,
-                            color: '#ff6600',
-                            fillColor: '#ff6600',
-                            fillOpacity: 0.7,
-                            downloadedMission: true
-                          }).addTo(mapRef.current)
-                          marker.bindTooltip(`${mission.sysid}-${wpIdx + 1}<br/>Sysid ${mission.sysid}<br/>${wp.command || 'waypoint'}`, {permanent: false})
-                          mapLayersRef.current.push(marker)
-                        })
-                        mapLayersRef.current.push(polyline)
-                      }
-                    })
-                    
-                    // Fit bounds to show everything
-                    const allBounds = []
-                    mapLayersRef.current.forEach(layer => {
-                      if (layer.getBounds) {
-                        allBounds.push(layer.getBounds())
-                      }
-                    })
-                    if (allBounds.length > 0) {
-                      const combinedBounds = allBounds.reduce((acc, bounds) => acc.extend(bounds))
-                      mapRef.current.fitBounds(combinedBounds.pad(0.1))
-                    }
-                  }} style={{padding: '6px 12px', fontSize: 12}}>Show All{selectedMission ? ` (${selectedMission})` : ''}</button>
-                </div>
-                
-                {/* Debug Status Window */}
-                <div style={{background: '#1f2937', padding: 8, borderRadius: 6, marginBottom: 12, border: '1px solid #374151'}}>
-                  <div style={{fontWeight: 700, fontSize: 14, color: '#f3f4f6', marginBottom: 8}}>
-                    Onboard Responses
-                  </div>
-                  <div style={{maxHeight: 200, overflow: 'auto', background: '#111827', padding: 8, borderRadius: 6}}>
-                    {downloadedMissions.length === 0 ? (
-                      <div style={{opacity: 0.6, color: '#9ca3af'}}>No drones have responded with onboard waypoints yet.</div>
+      <div className="app-body">
+        <aside className="sidebar">
+          <Panel
+            title="Birds"
+            actions={<input className="input" placeholder="Filter" value={birdFilter} onChange={(e) => setBirdFilter(e.target.value)} />}
+          >
+            <div className="bird-list">
+              {birdList.length === 0 ? (
+                <div className="empty">No birds observed yet.</div>
+              ) : (
+                birdList.map(bird => (
+                  <button
+                    key={bird.sysid}
+                    className={`bird-card ${String(selectedBird) === String(bird.sysid) ? 'active' : ''}`}
+                    onClick={() => setSelectedBird(bird.sysid)}
+                  >
+                    <div className="bird-title">Bird {bird.sysid}</div>
+                    <div className="bird-meta">Comp {bird.compid} · Topics {bird.topics.size}</div>
+                    <div className="bird-meta">Last seen {bird.lastSeen ? new Date(bird.lastSeen).toLocaleTimeString() : 'never'}</div>
+                    {bird.lat && bird.lon ? (
+                      <div className="bird-meta">{bird.lat.toFixed(5)}, {bird.lon.toFixed(5)}</div>
                     ) : (
-                      downloadedMissions.map((mission, idx) => (
-                        <div key={idx} style={{padding: 6, borderBottom: '1px solid rgba(255,255,255,0.1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginLeft: 8}}>
-                          <div>
-                            <div style={{fontWeight: 500, color: '#f3f4f6'}}>Sysid {mission.sysid}</div>
-                            <div style={{fontSize: 11, color: '#9ca3af'}}>count: {mission.count} waypoints</div>
-                          </div>
-                          <div>
-                            <button onClick={() => {
-                              // Clear existing layers
-                              if (mapLayersRef.current) {
-                                mapLayersRef.current.forEach(l => { 
-                                  if (l.options && l.options.downloadedMission) {
-                                    try { l.remove() } catch (e){} 
-                                  }
-                                })
-                                mapLayersRef.current = mapLayersRef.current.filter(l => !(l.options && l.options.downloadedMission))
-                              }
-                              
-                              // Show this downloaded mission
-                              if (mission.mission && mission.mission.length > 0) {
-                                const latlngs = mission.mission.map(wp => [wp.y / 1e7, wp.x / 1e7])
-                                const polyline = window.L.polyline(latlngs, {
-                                  color: '#ff6600',
-                                  weight: 3,
-                                  opacity: 0.8,
-                                  downloadedMission: true
-                                }).addTo(mapRef.current)
-                                
-                                mission.mission.forEach((wp, wpIdx) => {
-                                  const marker = window.L.circleMarker([wp.y / 1e7, wp.x / 1e7], {
-                                    radius: 7,
-                                    color: '#ff6600',
-                                    fillColor: '#ff6600',
-                                    fillOpacity: 0.7,
-                                    downloadedMission: true
-                                  }).addTo(mapRef.current)
-                                  marker.bindTooltip(`${mission.sysid}-${wpIdx + 1}<br/>Sysid ${mission.sysid}<br/>${wp.command || 'waypoint'}`, {permanent: false})
-                                  mapLayersRef.current.push(marker)
-                                })
-                                mapLayersRef.current.push(polyline)
-                                
-                                // Fit bounds
-                                const bounds = window.L.latLngBounds(latlngs)
-                                mapRef.current.fitBounds(bounds.pad(0.1))
-                              }
-                            }} style={{fontSize: 11, padding: '4px 6px', backgroundColor: '#374151', color: '#f3f4f6', border: '1px solid #4b5563'}}>Show</button>
-                          </div>
-                        </div>
-                      ))
+                      <div className="bird-meta muted">No position yet</div>
                     )}
+                  </button>
+                ))
+              )}
+            </div>
+          </Panel>
+
+          <Panel title="Fleet Summary">
+            <div className="stat-grid">
+              <div className="stat">
+                <div className="stat-label">Total</div>
+                <div className="stat-value">{fleetStats.total}</div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">Active</div>
+                <div className="stat-value">{fleetStats.active}</div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">Stale</div>
+                <div className="stat-value">{fleetStats.stale}</div>
+              </div>
+            </div>
+          </Panel>
+        </aside>
+
+        <main className="workspace">
+          {workspace === 'overview' && (
+            <div className="grid">
+              <Panel title="Live Telemetry" actions={<button className="ghost" onClick={sendLoadWaypointsDemo}>Send demo waypoints</button>}>
+                <div className="telemetry-list">
+                  {telemetry.length === 0 ? (
+                    <div className="empty">No telemetry received yet.</div>
+                  ) : (
+                    telemetry.slice(0, 30).map((t, i) => (
+                      <div key={i} className="telemetry-row">
+                        <div className="telemetry-time">{new Date(t.ts).toLocaleTimeString()}</div>
+                        <div className="telemetry-topic">{t.topic}</div>
+                        <div className="telemetry-msg">{t.msg}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </Panel>
+              <Panel title="System Status">
+                <div className="status-grid">
+                  <div>
+                    <div className="label">Backend</div>
+                    <div className="mono">{backendStatus ? JSON.stringify(backendStatus) : 'offline'}</div>
+                  </div>
+                  <div>
+                    <div className="label">Broker</div>
+                    <div className="mono">{brokerStatus ? JSON.stringify(brokerStatus) : 'unknown'}</div>
                   </div>
                 </div>
-              </div>
-              <h3>Waypoint files</h3>
-              <div style={{marginBottom: 12}}>
-                <label style={{fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 4, display: 'block'}}>Select Mission:</label>
-                <select 
-                  value={selectedMission} 
-                  onChange={(e) => setSelectedMission(e.target.value)}
-                  style={{width: '100%', padding: '6px 8px', borderRadius: 4, border: '1px solid #d1d5db'}}
-                >
-                  {Object.keys(groupWaypointFiles(wpFiles)).map((mission) => (
-                    <option key={mission} value={mission}>{mission}</option>
-                  ))}
-                  <option value="">-- All Missions --</option>
-                </select>
-              </div>
-              <div style={{maxHeight: 280, overflow: 'auto', background: '#f8fafc', padding: 8, borderRadius: 6}}>
-                {wpFiles.length === 0 ? (
-                  <div style={{opacity: 0.6}}>No waypoint files. Create demo files or upload from Settings.</div>
-                ) : (
-                  Object.entries(groupWaypointFiles(wpFiles))
-                    .filter(([mission]) => !selectedMission || mission === selectedMission)
-                    .map(([mission, groups]) => (
-                    <div key={mission} style={{marginBottom: 16}}>
-                      <div style={{fontWeight: 700, fontSize: 14, color: '#1e293b', marginBottom: 8}}>
-                        Mission: {mission}
+              </Panel>
+              <Panel title="Recent Missions">
+                <div className="mission-list">
+                  {downloadedMissions.length === 0 ? (
+                    <div className="empty">No missions downloaded yet.</div>
+                  ) : (
+                    downloadedMissions.slice(0, 5).map((mission, idx) => (
+                      <div key={idx} className="mission-row">
+                        <div>Sysid {mission.sysid}</div>
+                        <div className="muted">{mission.count} waypoints</div>
                       </div>
-                      {Object.entries(groups).map(([group, files]) => (
-                        <div key={group} style={{marginLeft: 12, marginBottom: 8}}>
-                          <div style={{fontWeight: 600, fontSize: 13, color: '#475569', marginBottom: 4}}>
-                            Group: {group}
-                          </div>
-                          {files.map((f) => (
-                            <div key={f.filename} style={{padding: 6, borderBottom: '1px solid rgba(0,0,0,0.06)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginLeft: 8}}>
-                              <div>
-                                <div style={{fontWeight: 500}}>{f.filename}</div>
-                                <div style={{fontSize: 11, color: '#64748b'}}>count: {f.count} valid: {String(f.valid)}</div>
-                              </div>
-                              <div>
-                                <button onClick={async () => { 
-                                  setSelectedFile(f.filename); 
-                                  await drawFileOnMap(f.filename);
-                                  // Also show downloaded missions for this sysid if available
-                                  const sysidMatch = f.filename.match(/^(\d+)_/);
-                                  if (sysidMatch) {
-                                    const sysid = parseInt(sysidMatch[1]);
-                                    // Filter downloaded missions for this sysid and show them
-                                    const sysidMissions = downloadedMissions.filter(m => m.sysid === sysid);
-                                    if (sysidMissions.length > 0) {
-                                      // Clear existing layers first
-                                      if (mapLayersRef.current) {
-                                        mapLayersRef.current.forEach(l => { 
-                                          if (l.options && (l.options.downloadedMission || l.options.plannedWaypoint)) {
-                                            try { l.remove() } catch (e){} 
-                                          }
-                                        })
-                                        mapLayersRef.current = mapLayersRef.current.filter(l => !(l.options && (l.options.downloadedMission || l.options.plannedWaypoint)))
-                                      }
-                                      // Re-draw planned waypoints
-                                      await drawFileOnMap(f.filename);
-                                      // Add downloaded missions for this sysid
-                                      sysidMissions.forEach((mission) => {
-                                        if (mission.mission && mission.mission.length > 0) {
-                                          const latlngs = mission.mission.map(wp => [wp.y / 1e7, wp.x / 1e7]);
-                                          const polyline = window.L.polyline(latlngs, {
-                                            color: '#ff6600',
-                                            weight: 3,
-                                            opacity: 0.8,
-                                            downloadedMission: true
-                                          }).addTo(mapRef.current);
-                                          
-                                          mission.mission.forEach((wp, wpIdx) => {
-                                            const marker = window.L.circleMarker([wp.y / 1e7, wp.x / 1e7], {
-                                              radius: 7,
-                                              color: '#ff6600',
-                                              fillColor: '#ff6600',
-                                              fillOpacity: 0.7,
-                                              downloadedMission: true
-                                            }).addTo(mapRef.current);
-                                            marker.bindTooltip(`${mission.sysid}-${wpIdx + 1}<br/>Sysid ${mission.sysid}<br/>${wp.command || 'waypoint'}`, {permanent: false})
-                                            mapLayersRef.current.push(marker)
-                                          })
-                                          mapLayersRef.current.push(polyline)
-                                        }
-                                      })
-                                    }
-                                  }
-                                }} style={{marginRight: 4, fontSize: 11, padding: '4px 6px'}}>Show</button>
-                                <button onClick={async () => { await sendToDronePrompt(f.filename) }} style={{fontSize: 11, padding: '4px 6px'}}>Send</button>
-                              </div>
+                    ))
+                  )}
+                </div>
+              </Panel>
+            </div>
+          )}
+
+          {workspace === 'fleet' && (
+            <div className="grid">
+              <Panel title="Fleet Locations">
+                <div className="location-grid">
+                  {birdList.length === 0 ? (
+                    <div className="empty">No location updates yet.</div>
+                  ) : (
+                    birdList.map(bird => (
+                      <div key={bird.sysid} className="location-card">
+                        <div className="location-title">Bird {bird.sysid}</div>
+                        <div className="location-meta">Last seen {bird.lastSeen ? new Date(bird.lastSeen).toLocaleTimeString() : 'never'}</div>
+                        <div className="location-coords">
+                          {bird.lat && bird.lon ? `${bird.lat.toFixed(5)}, ${bird.lon.toFixed(5)}` : 'No GPS fix'}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </Panel>
+              <Panel title="Fleet Telemetry Stream">
+                <div className="telemetry-list">
+                  {telemetry.length === 0 ? (
+                    <div className="empty">No telemetry received yet.</div>
+                  ) : (
+                    telemetry.slice(0, 40).map((t, i) => (
+                      <div key={i} className="telemetry-row">
+                        <div className="telemetry-time">{new Date(t.ts).toLocaleTimeString()}</div>
+                        <div className="telemetry-topic">{t.topic}</div>
+                        <div className="telemetry-msg">{t.msg}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </Panel>
+            </div>
+          )}
+
+          {workspace === 'bird' && (
+            <div className="grid">
+              <Panel title={selectedBird ? `Bird ${selectedBird} Overview` : 'Select a Bird'}>
+                {selectedBirdRecord ? (
+                  <div className="status-grid">
+                    <div>
+                      <div className="label">Last seen</div>
+                      <div className="mono">{selectedBirdRecord.lastSeen ? new Date(selectedBirdRecord.lastSeen).toLocaleTimeString() : 'never'}</div>
+                    </div>
+                    <div>
+                      <div className="label">Heartbeat</div>
+                      <div className="mono">{selectedBirdRecord.lastHeartbeat ? new Date(selectedBirdRecord.lastHeartbeat).toLocaleTimeString() : 'not seen'}</div>
+                    </div>
+                    <div>
+                      <div className="label">Position</div>
+                      <div className="mono">{selectedBirdRecord.lat && selectedBirdRecord.lon ? `${selectedBirdRecord.lat.toFixed(5)}, ${selectedBirdRecord.lon.toFixed(5)}` : 'no fix'}</div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="empty">Pick a bird from the left.</div>
+                )}
+              </Panel>
+              <Panel title="Bird Telemetry">
+                <div className="telemetry-list">
+                  {selectedBirdTelemetry.length === 0 ? (
+                    <div className="empty">No telemetry for this bird yet.</div>
+                  ) : (
+                    selectedBirdTelemetry.map((t, i) => (
+                      <div key={i} className="telemetry-row">
+                        <div className="telemetry-time">{new Date(t.ts).toLocaleTimeString()}</div>
+                        <div className="telemetry-topic">{t.topic}</div>
+                        <div className="telemetry-msg">{t.msg}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </Panel>
+            </div>
+          )}
+
+          {workspace === 'missions' && (
+            <div className="grid">
+              <Panel title="Mission Map">
+                <div id="map" className="map-shell" />
+              </Panel>
+              <Panel
+                title="Mission Controls"
+                actions={<button className="ghost" onClick={loadWaypointFiles}>Refresh</button>}
+              >
+                <div className="controls">
+                  <div className="field">
+                    <label>Select Mission</label>
+                    <select value={selectedMission} onChange={(e) => setSelectedMission(e.target.value)} className="input">
+                      {Object.keys(groupWaypointFiles(wpFiles)).map((mission) => (
+                        <option key={mission} value={mission}>{mission}</option>
+                      ))}
+                      <option value="">-- All Missions --</option>
+                    </select>
+                  </div>
+                  <div className="button-row">
+                    <button onClick={async () => { try { await fetch('/api/waypoints/demo', {method: 'POST'}); await loadWaypointFiles() } catch (e) { console.error(e) } }}>Create demo waypoints</button>
+                    <button onClick={() => setShowFlightPaths(!showFlightPaths)}>{showFlightPaths ? 'Hide' : 'Show'} onboard paths</button>
+                  </div>
+                </div>
+              </Panel>
+              <Panel title="Waypoint Files">
+                <div className="file-list">
+                  {wpFiles.length === 0 ? (
+                    <div className="empty">No waypoint files. Create demo files or upload from Settings.</div>
+                  ) : (
+                    Object.entries(groupWaypointFiles(wpFiles))
+                      .filter(([mission]) => !selectedMission || mission === selectedMission)
+                      .map(([mission, groups]) => (
+                        <div key={mission} className="file-group">
+                          <div className="file-group-title">Mission: {mission}</div>
+                          {Object.entries(groups).map(([group, files]) => (
+                            <div key={group} className="file-subgroup">
+                              <div className="file-subgroup-title">Group: {group}</div>
+                              {files.map((f) => (
+                                <div key={f.filename} className="file-row">
+                                  <div>
+                                    <div className="file-name">{f.filename}</div>
+                                    <div className="muted">count: {f.count} valid: {String(f.valid)}</div>
+                                  </div>
+                                  <div className="file-actions">
+                                    <button onClick={async () => { setSelectedFile(f.filename); await drawFileOnMap(f.filename) }}>Show</button>
+                                    <button onClick={async () => { await sendToDronePrompt(f.filename) }}>Send</button>
+                                  </div>
+                                </div>
+                              ))}
                             </div>
                           ))}
                         </div>
-                      ))}
-                    </div>
-                  ))
-                )}
-              </div>
-
-              <div style={{marginTop: 12}}>
-                <h4>Manual send</h4>
-                <div style={{display: 'flex', gap: 8, alignItems: 'center'}}>
-                  <label>sysid</label>
-                  <input type="number" value={sendSysid} onChange={(e) => setSendSysid(Number(e.target.value))} style={{width: 64}} />
-                  <label>compid</label>
-                  <input type="number" value={sendCompid} onChange={(e) => setSendCompid(Number(e.target.value))} style={{width: 64}} />
+                      ))
+                  )}
                 </div>
-                <div style={{marginTop: 8}}>
-                  <select value={selectedFile || ''} onChange={(e) => setSelectedFile(e.target.value)} style={{width: '100%'}}>
+              </Panel>
+              <Panel title="Manual Send">
+                <div className="controls">
+                  <div className="field-row">
+                    <label>sysid</label>
+                    <input type="number" value={sendSysid} onChange={(e) => setSendSysid(Number(e.target.value))} className="input" />
+                    <label>compid</label>
+                    <input type="number" value={sendCompid} onChange={(e) => setSendCompid(Number(e.target.value))} className="input" />
+                  </div>
+                  <select value={selectedFile || ''} onChange={(e) => setSelectedFile(e.target.value)} className="input">
                     <option value="">-- select file --</option>
                     {Object.entries(groupWaypointFiles(wpFiles)).map(([mission, groups]) =>
                       Object.entries(groups).map(([group, files]) =>
@@ -986,106 +1107,169 @@ export default function App() {
                       )
                     )}
                   </select>
-                  <div style={{marginTop: 8}}>
-                    <button onClick={async () => { if (selectedFile) await sendToDrone({sysid: sendSysid, compid: sendCompid, filename: selectedFile}) }} style={{padding: '8px 12px'}}>Send to Drone</button>
+                  <div className="button-row">
+                    <button onClick={async () => { if (selectedFile) await sendToDrone({sysid: sendSysid, compid: sendCompid, filename: selectedFile}) }}>Send to Drone</button>
                   </div>
                 </div>
-              </div>
-
-              <div style={{marginTop: 12}}>
-                <h4>Download Mission</h4>
-                <div style={{display: 'flex', gap: 8, alignItems: 'center'}}>
-                  <label>sysid</label>
-                  <input type="number" value={downloadSysid || 1} onChange={(e) => setDownloadSysid(Number(e.target.value))} style={{width: 64}} />
-                  <label>compid</label>
-                  <input type="number" value={downloadCompid || 1} onChange={(e) => setDownloadCompid(Number(e.target.value))} style={{width: 64}} />
-                  <button onClick={async () => { await downloadMissionFromDrone({sysid: downloadSysid || 1, compid: downloadCompid || 1}) }} style={{padding: '8px 12px'}}>Download from Drone</button>
-                  <button onClick={downloadFromAllDrones} style={{padding: '8px 12px', backgroundColor: '#4CAF50', color: 'white'}}>Download from All Drones</button>
+              </Panel>
+              <Panel title="Download Mission">
+                <div className="controls">
+                  <div className="field-row">
+                    <label>sysid</label>
+                    <input type="number" value={downloadSysid || 1} onChange={(e) => setDownloadSysid(Number(e.target.value))} className="input" />
+                    <label>compid</label>
+                    <input type="number" value={downloadCompid || 1} onChange={(e) => setDownloadCompid(Number(e.target.value))} className="input" />
+                  </div>
+                  <div className="button-row">
+                    <button onClick={async () => { await downloadMissionFromDrone({sysid: downloadSysid || 1, compid: downloadCompid || 1}) }}>Download from Drone</button>
+                    <button className="primary" onClick={downloadFromAllDrones}>Download from All Drones</button>
+                  </div>
                 </div>
-              </div>
+              </Panel>
+            </div>
+          )}
 
-              {downloadedMissions.length > 0 && (
-                <div style={{marginTop: 12}}>
-                  <h4>Downloaded Missions</h4>
-                  <div style={{maxHeight: 200, overflow: 'auto', background: '#f8fafc', padding: 8, borderRadius: 6}}>
-                    {downloadedMissions.map((mission, idx) => (
-                      <div key={idx} style={{padding: 8, borderBottom: '1px solid rgba(0,0,0,0.06)', marginBottom: 8}}>
-                        <div style={{fontWeight: 600}}>Sysid {mission.sysid}, {mission.count} waypoints</div>
-                        <div style={{fontSize: 12, color: '#475569', marginTop: 4}}>
-                          {mission.mission.slice(0, 3).map((wp, i) => (
-                            <div key={i}>WP {wp.seq}: {wp.command} at ({wp.x}, {wp.y}, {wp.z})</div>
-                          ))}
-                          {mission.mission.length > 3 && <div>... and {mission.mission.length - 3} more</div>}
-                        </div>
+          {workspace === 'qgc' && (
+            <div className="grid">
+              <Panel title="QGC Control">
+                <div className="controls">
+                  <div className="status-grid">
+                    <div>
+                      <div className="label">Selected bird</div>
+                      <div className="mono">{selectedBird ? `Bird ${selectedBird}` : 'none'}</div>
+                    </div>
+                    <div>
+                      <div className="label">Current mode</div>
+                      <div className="mono">{selectedBirdMode}</div>
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label>Mode selection</label>
+                    <div className="field-row">
+                      <select value={selectedMode} onChange={(e) => setSelectedMode(e.target.value)} className="input">
+                        {['AUTO', 'GUIDED', 'LOITER', 'RTL', 'HOLD', 'MISSION', 'STABILIZE'].map(mode => (
+                          <option key={mode} value={mode}>{mode}</option>
+                        ))}
+                      </select>
+                      <button onClick={sendModeCommand}>Set mode</button>
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label>Arming</label>
+                    <div className="field-row">
+                      <label className="toggle">
+                        <input type="checkbox" checked={armReady} onChange={(e) => setArmReady(e.target.checked)} />
+                        <span>Enable arm</span>
+                      </label>
+                      <button className="primary" disabled={!armReady} onClick={async () => { await sendArmCommand(true); setArmReady(false) }}>Arm</button>
+                      <button onClick={async () => { await sendArmCommand(false) }}>Disarm</button>
+                    </div>
+                  </div>
+                </div>
+              </Panel>
+              <Panel title="Multi-drone Map" actions={(
+                <div className="segmented">
+                  <button className={mapScope === 'all' ? 'active' : ''} onClick={() => setMapScope('all')}>All birds</button>
+                  <button className={mapScope === 'selected' ? 'active' : ''} onClick={() => setMapScope('selected')}>Selected only</button>
+                </div>
+              )}>
+                <div id="qgc-map" className="map-shell" />
+              </Panel>
+              <Panel title="Selected Bird Stream">
+                <div className="telemetry-list">
+                  {selectedBirdTelemetry.length === 0 ? (
+                    <div className="empty">No telemetry for this bird yet.</div>
+                  ) : (
+                    selectedBirdTelemetry.map((t, i) => (
+                      <div key={i} className="telemetry-row">
+                        <div className="telemetry-time">{new Date(t.ts).toLocaleTimeString()}</div>
+                        <div className="telemetry-topic">{t.topic}</div>
+                        <div className="telemetry-msg">{t.msg}</div>
                       </div>
-                    ))}
+                    ))
+                  )}
+                </div>
+              </Panel>
+            </div>
+          )}
+
+          {workspace === 'logs' && (
+            <div className="grid">
+              <Panel title="Telemetry Logs" actions={<input className="input" placeholder="Filter logs" value={logFilter} onChange={(e) => setLogFilter(e.target.value)} />}>
+                <div className="telemetry-list">
+                  {filteredTelemetry.length === 0 ? (
+                    <div className="empty">No telemetry matching the filter.</div>
+                  ) : (
+                    filteredTelemetry.map((t, i) => (
+                      <div key={i} className="telemetry-row">
+                        <div className="telemetry-time">{new Date(t.ts).toLocaleTimeString()}</div>
+                        <div className="telemetry-topic">{t.topic}</div>
+                        <div className="telemetry-msg">{t.msg}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </Panel>
+            </div>
+          )}
+
+          {workspace === 'settings' && (
+            <div className="grid">
+              <Panel title="Settings — Waypoint Upload">
+                <div className="controls">
+                  <div className="field">
+                    <label>Upload a waypoint YAML file (.yaml/.yml)</label>
+                    <input type="file" accept=".yaml,.yml" onChange={handleFileInput} className="input" />
+                  </div>
+                  <div className="field">
+                    <label>Paste raw YAML and save to filename</label>
+                    <input id="upload-filename" placeholder="filename.yaml" className="input" />
+                    <textarea id="upload-raw" rows={8} className="input" placeholder={'waypoints:\n  - lat: ...\n  - ...'} />
+                    <div className="button-row">
+                      <button onClick={async () => {
+                        const fn = document.getElementById('upload-filename').value || `uploaded-${Date.now()}.yaml`
+                        const raw = document.getElementById('upload-raw').value || ''
+                        if (!raw) {
+                          alert('paste YAML or use file upload')
+                          return
+                        }
+                        await uploadRawWaypoint(fn, raw)
+                      }}>Save</button>
+                    </div>
                   </div>
                 </div>
-              )}
+              </Panel>
             </div>
-          </div>
-        </section>
-      ) : (
-        <div style={{flex: 1}} />
-      )}
+          )}
+        </main>
+      </div>
 
-      {page === 'settings' && (
-        <section style={{marginTop: 16}}>
-          <h2>Settings — Waypoint Upload</h2>
-          <div style={{display: 'flex', gap: 12, marginTop: 12}}>
-            <div style={{flex: 1}}>
-              <div style={{background: '#f8fafc', padding: 12, borderRadius: 8}}>
-                <div style={{marginBottom: 8}}>Upload a waypoint YAML file (.yaml/.yml):</div>
-                <input type="file" accept=".yaml,.yml" onChange={handleFileInput} />
-              </div>
-              <div style={{height: 12}} />
-              <div style={{background: '#f8fafc', padding: 12, borderRadius: 8}}>
-                <div style={{marginBottom: 8}}>Or paste raw YAML and save to a filename:</div>
-                <input id="upload-filename" placeholder="filename.yaml" style={{width: '100%', marginBottom: 8}} />
-                <textarea id="upload-raw" rows={10} style={{width: '100%'}} placeholder={'waypoints:\n  - lat: ...\n  - ...'} />
-                <div style={{marginTop: 8}}>
-                  <button onClick={async () => {
-                    const fn = document.getElementById('upload-filename').value || `uploaded-${Date.now()}.yaml`
-                    const raw = document.getElementById('upload-raw').value || ''
-                    if (!raw) {
-                      alert('paste YAML or use file upload')
-                      return
-                    }
-                    await uploadRawWaypoint(fn, raw)
-                  }} style={{padding: '8px 12px'}}>Save</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      <footer style={{borderTop: '1px solid #e6edf3', padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-        <div style={{fontSize: 12, color: '#6b7280'}}>Backend: {backendStatus ? (backendStatus.ok ? 'online' : 'offline') : 'unknown'}</div>
-        <div style={{fontSize: 12, color: '#6b7280'}}>Broker: {brokerConfig ? `${brokerConfig.host}:${isElectron ? brokerConfig.tcp_port : brokerConfig.ws_port}` : (brokerMissing ? 'missing' : 'loading')}</div>
-        <div style={{fontSize: 12, color: '#6b7280', textAlign: 'right', maxWidth: '40%'}}>
+      <footer className="app-footer">
+        <div>Backend: {backendStatus ? (backendStatus.ok ? 'online' : 'offline') : 'unknown'}</div>
+        <div>Broker: {brokerConfig ? `${brokerConfig.host}:${isElectron ? brokerConfig.tcp_port : brokerConfig.ws_port}` : (brokerMissing ? 'missing' : 'loading')}</div>
+        <div className="footer-meta">
           {brokerMissing ? (
             <div>
-              <div style={{color: '#b91c1c'}}>broker.json missing or incomplete — see <code>config/broker.json</code></div>
-              <div style={{marginTop: 6}}>
-                <button onClick={retryFetchBroker} style={{padding: '6px 8px', borderRadius: 6}}>Reload broker config</button>
+              <div className="danger">broker.json missing or incomplete — see <code>config/broker.json</code></div>
+              <div className="button-row">
+                <button onClick={retryFetchBroker}>Reload broker config</button>
               </div>
             </div>
           ) : brokerError ? (
-            <div style={{color: '#b91c1c'}}>Broker error: {brokerError}</div>
+            <div className="danger">Broker error: {brokerError}</div>
           ) : brokerConfig ? (
-            <div style={{fontFamily: 'monospace', fontSize: 12, overflowX: 'auto'}}>{JSON.stringify(brokerConfig)}</div>
+            <div className="mono">{JSON.stringify(brokerConfig)}</div>
           ) : (
-            <div style={{color: '#94a3b8'}}>config loading...</div>
+            <div className="muted">config loading...</div>
           )}
         </div>
       </footer>
-      {/* Toast stack */}
-      <div style={{position: 'fixed', right: 12, top: 12, zIndex: 9999}}>
+
+      <div className="toast-stack">
         {toasts.map(t => (
-          <div key={t.id} style={{background: '#111827', color: '#fff', padding: 10, borderRadius: 6, boxShadow: '0 6px 18px rgba(0,0,0,0.2)', marginBottom: 8, minWidth: 240}}>
-            <div style={{fontWeight: 700}}>{t.title}</div>
-            <div style={{fontSize: 13, opacity: 0.9, marginTop: 6}}>{t.body}</div>
+          <div key={t.id} className="toast">
+            <div className="toast-title">{t.title}</div>
+            <div className="toast-body">{t.body}</div>
           </div>
         ))}
       </div>

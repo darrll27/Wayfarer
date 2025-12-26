@@ -1,0 +1,55 @@
+## GitHub Copilot / AI agent instructions for Nomad — concise
+
+Purpose: give an AI coding agent the exact, discoverable knowledge needed to work on the Nomad MAVLink→MQTT router + Electron UI.
+
+Big picture (one-liner)
+- Nomad is an MQTT-backed MAVLink router with a React/Electron frontend. Python backend processes the MAVLink logic and exposes REST endpoints; a local Aedes MQTT broker glues frontend and router.
+
+Major components (where to look)
+- `aedes_broker/` — MQTT broker and server scripts used in dev.
+- `backend/` — Python services; entry point `backend/api_server.py`. Core router code lives in `backend/mav_router/` (see `router.py`, `mavlink_io.py`, `mission_uploader.py`).
+- `backend/waypoint_validator/validator.py` — waypoint YAML parsing, validation, and hash generation.
+- `frontend/` — React app + Electron integration (`electron/main.js`, `preload.js`, `src/`).
+
+Authoritative conventions (must not change)
+- MQTT topic schema (exact):
+  - device view: `device/<sysid>/<compid>/<MAV_MSG_NAME>/<field>`
+  - source view: `sources/<src_sysid>/<src_compid>/<dest_sysid>/<dest_compid>/<MSG>/<port>`
+  - command input: `command/<target_sysid>/<target_compid>/details` (JSON payload)
+- Exact regexes to copy when matching topics:
+  - Device: ^device\/([0-9]+)\/([0-9]+)\/([A-Z0-9_]+)\/?(.*)$
+  - Source: ^sources\/([0-9]+)\/([0-9]+)\/([0-9]+)\/([0-9]+)\/([A-Z0-9_]+)\/([a-zA-Z0-9_]+)$
+  - Command: ^command\/([0-9]+)\/([0-9]+)\/details$
+- GCS sysid is fixed: 250. Router must not rewrite sysid/compid — only unwrap and republish fields.
+
+Critical flows to preserve and test
+- MAVLink → MQTT: publish both `device/...` and `sources/...` topics for each incoming MAVLink packet (see `mavlink_io.py`).
+- MQTT → MAVLink: subscribe to `command/<sysid>/<compid>/details` and convert JSON -> appropriate MAVLink messages (`COMMAND_LONG`, `MISSION_ITEM_INT`).
+- Mission upload: waypoint validator computes file hash and publishes validation to `Nomad/waypoints/<filename>/validation`; then API publishes `command/<sysid>/<compid>/load_waypoints`. Router implements the MISSION_COUNT → MISSION_ITEM_INT exchange (state machine: IDLE → REQUESTING → UPLOADING → VERIFYING).
+
+Quick dev commands (verified from repo)
+- Backend (dev): create venv, install deps, run the API server
+  - python -m venv .venv
+  - source .venv/bin/activate
+  - pip install -r requirements.txt
+  - python backend/api_server.py
+- Frontend (dev):
+  - cd frontend
+  - npm install
+  - npm start  # runs vite + electron in dev (concurrently)
+- Broker: `cd aedes_broker && npm start` or run the broker.js script if present.
+
+Tests and useful places for examples
+- Unit tests live under `tests/` and `hil_sil_tests/` (mission upload/download tests are representative). See `tests/test_mission_uploader_py.py` and `hil_sil_tests/test_mission_upload_download_serial.py` for integration-style examples.
+
+Small tips for an AI editing code here
+- Preserve all MQTT topic names, regex strings, and REST/MQTT contracts exactly. Any change must keep behavior intact.
+- Prefer adding small tests alongside behavior changes (look at existing pytest usage). Use existing mission YAML fixtures in `out_missions/` and `Files/waypoints/` for test data.
+- Follow the repository process model: prefer multiprocessing patterns already used in `backend/` modules rather than naive threading.
+
+If you need clarification, ask these targeted questions:
+- Should local dev use a system Python or the `.venv` flow above?
+- Which MQTT broker startup script should I use for integration tests (`aedes_broker` package.json or `broker.js`)?
+- Which waypoint YAML in `Files/waypoints/` is canonical for current drone groups?
+
+If this looks good, I can iterate and: add short examples (publish/subscribe snippets), add CI-friendly run commands, or extract the mission state machine into a small diagram.

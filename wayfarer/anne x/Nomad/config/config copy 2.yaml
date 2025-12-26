@@ -3,18 +3,21 @@ verbose: true
 # internal GCS sysid/compid
 gcs_sysid: 250
 gcs_compid: 190
-api_port: 8000
 
 # transports: define UDP/Serial ports to start. UDP host should be 0.0.0.0 to listen.
 transports:
   - type: udp
-    name: bridge_in
-    host: 0.0.0.0
-    port: 14552
-  - type: udp_send
-    name: bridge_out
+    name: udp_QGC
     host: 127.0.0.1
     port: 14551
+  - type: udp
+    name: udp_test
+    host: 0.0.0.0
+    port: 14550
+  - type: serial
+    name: serial_cu_usbmodem01
+    device: /dev/cu.usbmodem01
+    baud: 115200
 
 # groups: define fleets and their drone endpoints (drone id -> udp endpoint)
 groups:
@@ -36,17 +39,31 @@ groups:
 
 # endpoints: canonical mapping of logical endpoint names to URIs
 endpoints:
-  bridge_out: udp://127.0.0.1:14551
-
-command_out_port: bridge_out
+  drone_alpha_1: udp://127.0.0.1:14560
+  drone_alpha_2: udp://127.0.0.1:14561
+  drone_bravo_2: udp://127.0.0.1:14562
+  drone_bravo_3: udp://127.0.0.1:14563
+  drone_charlie_4: udp://127.0.0.1:14564
+  drone_charlie_5: udp://127.0.0.1:14565
 
 # forwarding rules: forward everything based on PORTS (port-centric)
 # For observability we enqueue into transports (to_port) so the router + mqtt
 # adapters can observe forwarded traffic as if it came from that port.
 forwards:
-  - from: bridge_in
-    dedupe_window: 0
+  - from: serial_cu_usbmodem01
+    dedupe_window: 0.5
     to:
-      - type: udp
-        host: 127.0.0.1
-        port: 14550
+      - type: to_port
+        port_name: drone_alpha_1
+      - type: to_port
+        port_name: drone_alpha_2
+      - type: to_port
+        port_name: drone_bravo_2
+      - type: to_port
+        port_name: drone_bravo_3
+      - type: to_port
+        port_name: drone_charlie_4
+      - type: to_port
+        port_name: drone_charlie_5
+      - type: to_port
+        port_name: udp_QGC

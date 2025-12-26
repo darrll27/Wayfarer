@@ -17,6 +17,7 @@ DEFAULTS = {
     },
     "gcs_sysid": 250,
     "gcs_compid": 1,
+    "command_out_port": None,
 }
 
 
@@ -26,7 +27,7 @@ def load_config(repo_root: Path = None) -> dict:
     Accepts either `Config.yaml` or `config.yaml` (case-insensitive) to be
     tolerant of different naming. Returns a dict merging DEFAULTS with the
     loaded values. Keys merged: mqtt, transports, endpoints, groups, forwards,
-    gcs_sysid, gcs_compid.
+    gcs_sysid, gcs_compid, command_out_port.
     """
     # assume repo root is one level up from this file (backend/..)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
@@ -78,6 +79,8 @@ def load_config(repo_root: Path = None) -> dict:
         cfg["gcs_sysid"] = user_cfg["gcs_sysid"]
     if "gcs_compid" in user_cfg:
         cfg["gcs_compid"] = user_cfg["gcs_compid"]
+    if "command_out_port" in user_cfg:
+        cfg["command_out_port"] = user_cfg["command_out_port"]
 
     # propagate verbose flag if set
     cfg["verbose"] = user_cfg.get("verbose", False)

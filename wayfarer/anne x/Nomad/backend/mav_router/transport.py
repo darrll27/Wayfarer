@@ -8,6 +8,7 @@ Outbound messages are taken from a per-port outbound queue as tuples
 """
 from __future__ import annotations
 
+import os
 import socket
 import time
 import threading
@@ -26,6 +27,7 @@ def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, 
     Emits into router_in_q: (port_name, src_addr, data_bytes)
     Consumes from port_out_q: (dest_addr, data_bytes)
     """
+    debug = os.environ.get("NOMAD_UDP_DEBUG") == "1"
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(bind_addr)
@@ -37,6 +39,8 @@ def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, 
             try:
                 data, addr = sock.recvfrom(recv_buf)
                 if data:
+                    if debug:
+                        print(f"[transport:{name}] recv {len(data)} bytes from {addr}")
                     router_in_q.put((name, addr, data))
                     # also publish a copy to mqtt publisher queue (non-blocking)
                     if mqtt_pub_q is not None:
@@ -55,6 +59,8 @@ def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, 
                         # no destination specified, drop
                         continue
                     try:
+                        if debug:
+                            print(f"[transport:{name}] send {len(outb)} bytes to {dest}")
                         sock.sendto(outb, dest)
                     except Exception:
                         # transient send failure; ignore
@@ -63,6 +69,34 @@ def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, 
                 # transient, continue loop
                 pass
 
+            time.sleep(0.001)
+    except KeyboardInterrupt:
+        print(f"[transport:{name}] stopping")
+    finally:
+        sock.close()
+
+
+def udp_send_process(name: str, port_out_q: Queue):
+    """Send-only UDP loop. Emits data from out_q to dest_addr without binding a fixed port."""
+    debug = os.environ.get("NOMAD_UDP_DEBUG") == "1"
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(0.5)
+    print(f"[transport:{name}] send-only UDP (ephemeral bind)")
+    try:
+        while True:
+            try:
+                while not port_out_q.empty():
+                    dest, outb = port_out_q.get_nowait()
+                    if dest is None:
+                        continue
+                    try:
+                        if debug:
+                            print(f"[transport:{name}] send {len(outb)} bytes to {dest}")
+                        sock.sendto(outb, dest)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             time.sleep(0.001)
     except KeyboardInterrupt:
         print(f"[transport:{name}] stopping")
@@ -90,6 +124,22 @@ class UDPPort:
             # For threads, we can't "terminate" like processes, but we can set a flag or just let it finish
             # Since these are daemon threads, they'll be cleaned up when the main process exits
             pass
+
+
+class UDPSendPort:
+    def __init__(self, name: str):
+        self.name = name
+        self.out_q: Queue = Queue()
+        self.thread: Optional[threading.Thread] = None
+
+    def start(self):
+        self.thread = threading.Thread(target=udp_send_process, args=(self.name, self.out_q))
+        self.thread.daemon = True
+        self.thread.start()
+        return self.thread
+
+    def stop(self):
+        pass
 
 
 def serial_port_process(name: str, device: str, baud: int, router_in_q: Queue, port_out_q: Queue, mqtt_pub_q: Optional[Queue] = None, read_size: int = 1024):
@@ -201,4 +251,4 @@ class SerialPort:
             pass
 
 
-__all__ = ["udp_port_process", "UDPPort", "serial_port_process", "SerialPort"]
+__all__ = ["udp_port_process", "udp_send_process", "UDPPort", "UDPSendPort", "serial_port_process", "SerialPort"]

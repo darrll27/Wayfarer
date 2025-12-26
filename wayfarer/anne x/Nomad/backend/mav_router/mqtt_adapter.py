@@ -7,6 +7,7 @@ and `device/.../RAW` topics and subscribes to `command/+/+/details` and
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import warnings
@@ -24,6 +25,7 @@ except Exception:
 
 from . import mavlink_encoder
 from backend.waypoint_validator import validator as waypoint_validator
+from backend.config_manager import resolve_endpoint
 
 
 class MissionManager:
@@ -172,10 +174,14 @@ class MissionManager:
     def _send_to_drone(self, sysid: int, data: bytes) -> bool:
         """Send data to drone via appropriate transport port."""
         dest_port = None
-        for p, seen in self.router.observed_sysids.items():
-            if sysid in seen:
-                dest_port = p
-                break
+        forced_port = self.cfg.get("command_out_port")
+        if forced_port:
+            dest_port = forced_port
+        else:
+            for p, seen in self.router.observed_sysids.items():
+                if sysid in seen:
+                    dest_port = p
+                    break
 
         # Debug: report routing decision
         try:
@@ -184,7 +190,7 @@ class MissionManager:
             pass
 
         if dest_port and dest_port in self.ports:
-            dest_addr = self.router.last_addr.get(dest_port)
+            dest_addr = self._resolve_dest_addr(dest_port)
             if dest_addr:
                 try:
                     # show a short preview of bytes being sent
@@ -204,6 +210,18 @@ class MissionManager:
             except Exception:
                 pass
         return False
+
+    def _resolve_dest_addr(self, port_name: str):
+        dest_addr = getattr(self.router, "last_addr", {}).get(port_name)
+        if dest_addr:
+            return dest_addr
+        try:
+            ep = resolve_endpoint(port_name, self.cfg)
+            if ep and ep.get("host") and ep.get("port"):
+                return (ep.get("host"), int(ep.get("port")))
+        except Exception:
+            pass
+        return None
 
     def handle_mission_count(self, sysid: int, compid: int, count: int):
         """Handle MISSION_COUNT received from vehicle to start download state."""
@@ -284,15 +302,24 @@ class MQTTAdapter:
         host = self.cfg["mqtt"]["host"]
         port = self.cfg["mqtt"]["port"]
         print(f"[mqtt_adapter] attempting to connect to MQTT broker at {host}:{port}")
-        try:
-            self.client.connect(host, port, self.cfg["mqtt"].get("keepalive", 60))
-            print(f"[mqtt_adapter] successfully connected to MQTT broker at {host}:{port}")
-        except Exception as e:
-            print(f"[mqtt_adapter] FAILED to connect to MQTT broker at {host}:{port}")
-            print(f"[mqtt_adapter] Error details: {type(e).__name__}: {e}")
-            print(f"[mqtt_adapter] This usually means the MQTT broker is not running or not accepting connections")
-            print(f"[mqtt_adapter] Check that Aedes broker is started and listening on {host}:{port}")
-            raise e
+        max_attempts = int(os.environ.get("NOMAD_MQTT_CONNECT_RETRY", "0") or "0")
+        delay_s = float(os.environ.get("NOMAD_MQTT_CONNECT_DELAY_S", "1.0") or "1.0")
+        attempt = 0
+        while True:
+            try:
+                self.client.connect(host, port, self.cfg["mqtt"].get("keepalive", 60))
+                print(f"[mqtt_adapter] successfully connected to MQTT broker at {host}:{port}")
+                break
+            except Exception as e:
+                attempt += 1
+                if max_attempts > 0 and attempt >= max_attempts:
+                    print(f"[mqtt_adapter] FAILED to connect to MQTT broker at {host}:{port} after {attempt} attempts")
+                    print(f"[mqtt_adapter] Error details: {type(e).__name__}: {e}")
+                    print(f"[mqtt_adapter] This usually means the MQTT broker is not running or not accepting connections")
+                    print(f"[mqtt_adapter] Check that Aedes broker is started and listening on {host}:{port}")
+                    raise e
+                print(f"[mqtt_adapter] connect failed (attempt {attempt}{'/' + str(max_attempts) if max_attempts > 0 else ''}); retrying in {delay_s:.1f}s: {type(e).__name__}: {e}")
+                time.sleep(delay_s)
         
         # start MQTT network loop in a background thread
         print("[mqtt_adapter] starting MQTT network loop thread")
@@ -418,9 +445,9 @@ class MQTTAdapter:
                 self.pending_commands.setdefault(target_sys, []).append((topic, data))
                 return
 
-            dest_addr = self.router.last_addr.get(dest_port)
+            dest_addr = self._resolve_dest_addr(dest_port)
             if dest_addr is None:
-                print(f"[mqtt_adapter] no last_addr for port {dest_port}; cannot send")
+                print(f"[mqtt_adapter] no dest_addr for port {dest_port}; cannot send")
                 return
 
             # if payload is a JSON command describing a MAVLink message, try encoding
@@ -773,6 +800,18 @@ class MQTTAdapter:
                 # Queue timeout or other error, continue loop
                 continue
 
+    def _resolve_dest_addr(self, port_name: str):
+        dest_addr = getattr(self.router, "last_addr", {}).get(port_name)
+        if dest_addr:
+            return dest_addr
+        try:
+            ep = resolve_endpoint(port_name, self.cfg)
+            if ep and ep.get("host") and ep.get("port"):
+                return (ep.get("host"), int(ep.get("port")))
+        except Exception:
+            pass
+        return None
+
     def _pending_loop(self):
         """Background loop that attempts to deliver pending commands when their
         target sysid becomes observed on a port.
@@ -790,7 +829,7 @@ class MQTTAdapter:
                             break
                     if dest_port is None:
                         continue
-                    dest_addr = getattr(self.router, "last_addr", {}).get(dest_port)
+                    dest_addr = self._resolve_dest_addr(dest_port)
                     if dest_addr is None:
                         continue
                     items = list(self.pending_commands.get(target_sys, []))

@@ -16,7 +16,7 @@ if str(repo_root) not in sys.path:
 
 import time
 from multiprocessing import Queue, set_start_method
-from backend.mav_router.transport import UDPPort, SerialPort
+from backend.mav_router.transport import UDPPort, UDPSendPort, SerialPort
 from backend.mav_router.router import Router
 from backend.mav_router.mqtt_adapter import MQTTAdapter
 from backend.config_manager import load_config, parse_endpoint_uri, resolve_endpoint
@@ -64,6 +64,12 @@ def main():
             host = t.get("host", "0.0.0.0")
             port = int(t.get("port", 14550))
             udp = UDPPort(name, host, port, router_in_q, mqtt_pub_q=mqtt_pub_q)
+            udp.start()
+            udp_objects[name] = udp
+            ports[name] = {"out_q": udp.out_q}
+        elif t.get("type") in ("udp_send", "udp_out"):
+            name = t.get("name")
+            udp = UDPSendPort(name)
             udp.start()
             udp_objects[name] = udp
             ports[name] = {"out_q": udp.out_q}
