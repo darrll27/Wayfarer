@@ -7,6 +7,16 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 FRONTEND_DIR="$ROOT_DIR/frontend"
+LOG_DIR="$ROOT_DIR/logs"
+
+mkdir -p "$LOG_DIR"
+
+timestamp_pipe() {
+  local logfile="$1"
+  while IFS= read -r line; do
+    printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$line" >> "$logfile"
+  done
+}
 
 DESKTOP_MODE=false
 BACKEND_ONLY=false
@@ -31,12 +41,14 @@ trap cleanup INT TERM
 echo "Starting backend FastAPI (uvicorn) on :8000"
 cd "$ROOT_DIR"
 # Run uvicorn in background so the script can continue. Uses the venv if activated.
-uvicorn backend.config_api:app --port 8000 --reload &
+echo "[dev] backend log: $LOG_DIR/api.log"
+(uvicorn backend.config_api:app --port 8000 --reload 2>&1 | timestamp_pipe "$LOG_DIR/api.log") &
 PIDS+=("$!")
 
 echo "Starting Aedes dev broker (will wait for backend)"
 cd "$FRONTEND_DIR"
-node scripts/aedes_server.js &
+echo "[dev] broker log: $LOG_DIR/aedes.log"
+(node scripts/aedes_server.js 2>&1 | timestamp_pipe "$LOG_DIR/aedes.log") &
 PIDS+=("$!")
 
 if [ "$BACKEND_ONLY" = true ]; then
@@ -45,10 +57,12 @@ if [ "$BACKEND_ONLY" = true ]; then
   wait
 elif [ "$DESKTOP_MODE" = true ]; then
   echo "Starting frontend (desktop mode) — this will run vite and electron"
-  npm run dev:desktop
+  echo "[dev] frontend log: $LOG_DIR/frontend.log"
+  npm run dev:desktop 2>&1 | timestamp_pipe "$LOG_DIR/frontend.log"
 else
   echo "Starting frontend dev server"
-  npm run dev
+  echo "[dev] frontend log: $LOG_DIR/frontend.log"
+  npm run dev 2>&1 | timestamp_pipe "$LOG_DIR/frontend.log"
 fi
 
 # If we get here (frontend exited), clean up

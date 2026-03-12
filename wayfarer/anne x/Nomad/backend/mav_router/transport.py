@@ -8,6 +8,7 @@ Outbound messages are taken from a per-port outbound queue as tuples
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import time
@@ -20,6 +21,59 @@ try:
 except Exception:
     serial = None  # pyserial optional; errors raised when attempting serial transport
 
+try:
+    from pymavlink import mavutil
+    _MAVLINK_AVAILABLE = True
+except Exception:
+    mavutil = None
+    _MAVLINK_AVAILABLE = False
+
+
+def _open_packet_logs(name: str):
+    if os.environ.get("NOMAD_PACKET_LOG") != "1":
+        return None, None
+    log_dir = os.environ.get("NOMAD_LOG_DIR", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    raw_path = os.path.join(log_dir, f"udp_packets_{name}.raw.log")
+    decoded_path = os.path.join(log_dir, f"udp_packets_{name}.decoded.log")
+    raw_f = open(raw_path, "a", buffering=1)
+    decoded_f = open(decoded_path, "a", buffering=1) if os.environ.get("NOMAD_PACKET_DECODE") == "1" else None
+    return raw_f, decoded_f
+
+
+def _log_raw(raw_f, direction: str, name: str, addr, data: bytes):
+    if not raw_f:
+        return
+    entry = {
+        "ts": time.time(),
+        "dir": direction,
+        "port": name,
+        "addr": addr,
+        "len": len(data),
+        "hex": data.hex(),
+    }
+    raw_f.write(json.dumps(entry) + "\n")
+
+
+def _log_decoded(decoded_f, parser, direction: str, name: str, addr, data: bytes):
+    if not decoded_f or not parser:
+        return
+    try:
+        for b in data:
+            msg = parser.parse_char(bytes([b]))
+            if msg:
+                entry = {
+                    "ts": time.time(),
+                    "dir": direction,
+                    "port": name,
+                    "addr": addr,
+                    "type": msg.get_type(),
+                    "fields": msg.to_dict(),
+                }
+                decoded_f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
 
 def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, port_out_q: Queue, mqtt_pub_q: Optional[Queue] = None, recv_buf: int = 4096):
     """Process loop for a UDP port. Blocks on socket recv and polls out queue periodically.
@@ -28,6 +82,8 @@ def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, 
     Consumes from port_out_q: (dest_addr, data_bytes)
     """
     debug = os.environ.get("NOMAD_UDP_DEBUG") == "1"
+    raw_f, decoded_f = _open_packet_logs(name)
+    parser = mavutil.mavlink.MAVLink(None) if _MAVLINK_AVAILABLE and decoded_f else None
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(bind_addr)
@@ -41,6 +97,8 @@ def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, 
                 if data:
                     if debug:
                         print(f"[transport:{name}] recv {len(data)} bytes from {addr}")
+                    _log_raw(raw_f, "in", name, addr, data)
+                    _log_decoded(decoded_f, parser, "in", name, addr, data)
                     router_in_q.put((name, addr, data))
                     # also publish a copy to mqtt publisher queue (non-blocking)
                     if mqtt_pub_q is not None:
@@ -61,6 +119,8 @@ def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, 
                     try:
                         if debug:
                             print(f"[transport:{name}] send {len(outb)} bytes to {dest}")
+                        _log_raw(raw_f, "out", name, dest, outb)
+                        _log_decoded(decoded_f, parser, "out", name, dest, outb)
                         sock.sendto(outb, dest)
                     except Exception:
                         # transient send failure; ignore
@@ -73,12 +133,21 @@ def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, 
     except KeyboardInterrupt:
         print(f"[transport:{name}] stopping")
     finally:
+        try:
+            if raw_f:
+                raw_f.close()
+            if decoded_f:
+                decoded_f.close()
+        except Exception:
+            pass
         sock.close()
 
 
 def udp_send_process(name: str, port_out_q: Queue):
     """Send-only UDP loop. Emits data from out_q to dest_addr without binding a fixed port."""
     debug = os.environ.get("NOMAD_UDP_DEBUG") == "1"
+    raw_f, decoded_f = _open_packet_logs(name)
+    parser = mavutil.mavlink.MAVLink(None) if _MAVLINK_AVAILABLE and decoded_f else None
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(0.5)
     print(f"[transport:{name}] send-only UDP (ephemeral bind)")
@@ -92,6 +161,8 @@ def udp_send_process(name: str, port_out_q: Queue):
                     try:
                         if debug:
                             print(f"[transport:{name}] send {len(outb)} bytes to {dest}")
+                        _log_raw(raw_f, "out", name, dest, outb)
+                        _log_decoded(decoded_f, parser, "out", name, dest, outb)
                         sock.sendto(outb, dest)
                     except Exception:
                         pass
@@ -101,6 +172,13 @@ def udp_send_process(name: str, port_out_q: Queue):
     except KeyboardInterrupt:
         print(f"[transport:{name}] stopping")
     finally:
+        try:
+            if raw_f:
+                raw_f.close()
+            if decoded_f:
+                decoded_f.close()
+        except Exception:
+            pass
         sock.close()
 
 

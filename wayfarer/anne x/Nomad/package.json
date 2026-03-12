@@ -7,5 +7,8 @@
     "dev:desktop": "bash ./scripts/dev.sh desktop",
     "backend": "uvicorn backend.config_api:app --reload --port 8000",
     "backend+broker": "bash ./scripts/dev.sh backend-only"
+  },
+  "devDependencies": {
+    "baseline-browser-mapping": "^2.10.0"
   }
 }

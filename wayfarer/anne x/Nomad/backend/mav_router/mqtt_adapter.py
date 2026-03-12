@@ -298,6 +298,94 @@ class MQTTAdapter:
         # Mission manager for handling upload/download operations
         self.mission_manager = MissionManager(cfg, router, ports, self.client)
 
+    def _px4_custom_mode_from_label(self, mode_label: str) -> int | None:
+        if not mode_label:
+            return None
+        label = str(mode_label).strip().upper().replace(" ", "_").replace("-", "_")
+        label = label.replace("PX4_CUSTOM_MAIN_MODE_", "")
+        label = label.replace("PX4_CUSTOM_SUB_MODE_AUTO_", "AUTO_")
+        label = label.replace("PX4_CUSTOM_SUB_MODE_POSCTL_", "POSCTL_")
+
+        main_modes = {
+            "MANUAL": 1,
+            "ALTCTL": 2,
+            "ALTITUDE": 2,
+            "POSCTL": 3,
+            "POSITION": 3,
+            "AUTO": 4,
+            "ACRO": 5,
+            "OFFBOARD": 6,
+            "STABILIZED": 7,
+            "STABILIZE": 7,
+            "RATTITUDE": 8,
+            "RATTITUDE_LEGACY": 8,
+            "SIMPLE": 9,
+            "TERMINATION": 10,
+            "ALTITUDE_CRUISE": 11,
+        }
+
+        auto_sub_modes = {
+            "AUTO_READY": 1,
+            "AUTO_TAKEOFF": 2,
+            "AUTO_LOITER": 3,
+            "AUTO_MISSION": 4,
+            "AUTO_RTL": 5,
+            "AUTO_LAND": 6,
+            "AUTO_RESERVED_DO_NOT_USE": 7,
+            "AUTO_FOLLOW_TARGET": 8,
+            "AUTO_PRECLAND": 9,
+            "AUTO_VTOL_TAKEOFF": 10,
+            "AUTO_EXTERNAL1": 11,
+            "AUTO_EXTERNAL2": 12,
+            "AUTO_EXTERNAL3": 13,
+            "AUTO_EXTERNAL4": 14,
+            "AUTO_EXTERNAL5": 15,
+            "AUTO_EXTERNAL6": 16,
+            "AUTO_EXTERNAL7": 17,
+            "AUTO_EXTERNAL8": 18,
+            "HOLD": 3,
+            "LOITER": 3,
+            "MISSION": 4,
+            "RTL": 5,
+            "RETURN": 5,
+            "TAKEOFF": 2,
+            "LAND": 6,
+            "FOLLOW_TARGET": 8,
+            "PRECLAND": 9,
+            "VTOL_TAKEOFF": 10,
+        }
+
+        posctl_sub_modes = {
+            "POSCTL_POSCTL": 0,
+            "POSCTL_ORBIT": 1,
+            "POSCTL_SLOW": 2,
+            "ORBIT": 1,
+            "SLOW": 2,
+        }
+
+        if ":" in label:
+            main_label, sub_label = label.split(":", 1)
+        else:
+            main_label, sub_label = label, ""
+
+        if main_label == "AUTO" or main_label == "PX4_CUSTOM_MAIN_MODE_AUTO":
+            main_mode = 4
+            sub_mode = auto_sub_modes.get(sub_label or "AUTO_READY")
+        elif main_label == "POSCTL" or main_label == "POSITION":
+            main_mode = 3
+            sub_mode = posctl_sub_modes.get(sub_label)
+        else:
+            main_mode = main_modes.get(main_label)
+            sub_mode = None
+
+        if main_mode is None:
+            return None
+        if main_mode not in (3, 4):
+            return (main_mode << 16)
+        if sub_mode is None:
+            return (main_mode << 16)
+        return (main_mode << 16) | (sub_mode << 24)
+
     def start(self):
         host = self.cfg["mqtt"]["host"]
         port = self.cfg["mqtt"]["port"]
@@ -441,19 +529,60 @@ class MQTTAdapter:
 
             if dest_port is None:
                 # no known port for target; queue for later delivery
-                print(f"[mqtt_adapter] no transport port known for target sysid {target_sys}; queueing")
+                try:
+                    observed = {k: sorted(list(v)) for k, v in getattr(self.router, 'observed_sysids', {}).items()}
+                except Exception:
+                    observed = {}
+                print(f"[mqtt_adapter] no transport port known for target sysid {target_sys}; queueing (observed_sysids={observed})")
                 self.pending_commands.setdefault(target_sys, []).append((topic, data))
                 return
 
             dest_addr = self._resolve_dest_addr(dest_port)
             if dest_addr is None:
-                print(f"[mqtt_adapter] no dest_addr for port {dest_port}; cannot send")
+                try:
+                    last_addr = getattr(self.router, 'last_addr', {})
+                except Exception:
+                    last_addr = {}
+                print(f"[mqtt_adapter] no dest_addr for port {dest_port}; cannot send (last_addr={last_addr})")
                 return
 
             # if payload is a JSON command describing a MAVLink message, try encoding
             out_bytes = None
             try:
-                if isinstance(data, dict) and (data.get("msg") == "COMMAND_LONG" or data.get("type") == "COMMAND_LONG"):
+                if isinstance(data, dict) and (data.get("command") == "SET_MODE" or data.get("msg") == "SET_MODE" or data.get("type") == "SET_MODE"):
+                    tgt_sys = int(data.get("target_sys", target_sys))
+                    tgt_comp = int(data.get("target_comp", target_comp))
+                    base_mode = int(data.get("base_mode", 1))
+                    custom_mode = data.get("custom_mode")
+                    if custom_mode is None:
+                        custom_mode = self._px4_custom_mode_from_label(data.get("mode"))
+                    if custom_mode is None:
+                        raise ValueError(f"unknown mode label for SET_MODE: {data.get('mode')}")
+                    params = [base_mode, int(custom_mode), 0, 0, 0, 0, 0]
+                    src_sys = self.cfg.get("gcs_sysid", 255)
+                    src_comp = self.cfg.get("gcs_compid", 1)
+                    out_bytes = mavlink_encoder.encode_command_long(
+                        tgt_sys,
+                        tgt_comp,
+                        176,
+                        params,
+                        src_sys=src_sys,
+                        src_comp=src_comp,
+                    )
+                    print(f"[mqtt_adapter] encoded SET_MODE -> {len(out_bytes)} bytes (target={tgt_sys}/{tgt_comp} base_mode={base_mode} custom_mode={int(custom_mode)} mode_label={data.get('mode')})")
+                    try:
+                        ack_topic = f"command/{tgt_sys}/{tgt_comp}/ack"
+                        ack_payload = json.dumps({
+                            "status": "encoded",
+                            "msg": "SET_MODE",
+                            "bytes": len(out_bytes),
+                            "base_mode": base_mode,
+                            "custom_mode": int(custom_mode),
+                        })
+                        self.client.publish(ack_topic, ack_payload)
+                    except Exception:
+                        pass
+                elif isinstance(data, dict) and (data.get("msg") == "COMMAND_LONG" or data.get("type") == "COMMAND_LONG"):
                     # expected schema: {"msg":"COMMAND_LONG","target_sys":1,"target_comp":1,"command":400,"params":[...]} 
                     tgt_sys = int(data.get("target_sys", target_sys))
                     tgt_comp = int(data.get("target_comp", target_comp))
@@ -499,7 +628,7 @@ class MQTTAdapter:
                 out_bytes = json.dumps({"topic": topic, "payload": data}).encode("utf-8")
             try:
                 self.ports[dest_port]["out_q"].put((dest_addr, out_bytes))
-                print(f"[mqtt_adapter] injected command for {target_sys} into port {dest_port} -> {dest_addr}")
+                print(f"[mqtt_adapter] injected command for {target_sys} into port {dest_port} -> {dest_addr} (len={len(out_bytes)})")
             except Exception as e:
                 print("[mqtt_adapter] failed to inject into out_q:", e)
 

@@ -1,0 +1,273 @@
+import {useEffect, useRef, useState} from 'react'
+import subscriptions from '../subscriptions.json'
+
+const isElectron = typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Electron') || (typeof window !== 'undefined' && window.process && window.process.versions && window.process.versions.electron)
+
+export default function useTelemetry(addToast) {
+  const [connStatus, setConnStatus] = useState('disconnected')
+  const [telemetry, setTelemetry] = useState([])
+  const [backendStatus, setBackendStatus] = useState(null)
+  const [backendHeartbeatTs, setBackendHeartbeatTs] = useState(0)
+  const [brokerConfig, setBrokerConfig] = useState(null)
+  const [brokerMissing, setBrokerMissing] = useState(false)
+  const [brokerError, setBrokerError] = useState(null)
+  const [brokerStatus, setBrokerStatus] = useState(null)
+  const [downloadedMissions, setDownloadedMissions] = useState([])
+
+  const clientRef = useRef(null)
+  const brokerRef = useRef(null)
+  const addToastRef = useRef(addToast)
+  const telemetryBufferRef = useRef([])
+  const lastMessageTsRef = useRef(0)
+  const reconnectingRef = useRef(false)
+  const connStatusRef = useRef('disconnected')
+
+  useEffect(() => {
+    connStatusRef.current = connStatus
+  }, [connStatus])
+
+  useEffect(() => {
+    addToastRef.current = addToast
+  }, [addToast])
+
+  useEffect(() => {
+    if (brokerConfig) {
+      fetch('/api/status').then(r => r.ok ? r.json() : null).then(setBrokerStatus).catch(() => setBrokerStatus(null))
+    } else {
+      setBrokerStatus(null)
+    }
+  }, [brokerConfig])
+
+  async function fetchBrokerConfig() {
+    try {
+      if (isElectron && window && window.electronAPI && typeof window.electronAPI.getBrokerConfig === 'function') {
+        const cfg = await window.electronAPI.getBrokerConfig()
+        if (!cfg) {
+          setBrokerMissing(true)
+          setBrokerError('electron preload: no broker.json found')
+          setBrokerConfig(null)
+          return null
+        }
+        setBrokerConfig(cfg)
+        setBrokerMissing(false)
+        setBrokerError(null)
+        return cfg
+      }
+
+      const resp = await fetch('/api/config')
+      if (!resp.ok) {
+        const text = await resp.text()
+        const err = `HTTP ${resp.status} ${resp.statusText}: ${text}`
+        setBrokerMissing(true)
+        setBrokerError(err)
+        setBrokerConfig(null)
+        console.warn('broker config fetch failed:', err)
+        return null
+      }
+      const json = await resp.json()
+      setBrokerConfig(json)
+      setBrokerMissing(false)
+      setBrokerError(null)
+      return json
+    } catch (e) {
+      setBrokerMissing(true)
+      setBrokerError(String(e))
+      setBrokerConfig(null)
+      console.warn('broker config fetch error', e)
+      return null
+    }
+  }
+
+  async function connectWithBroker(broker, mountedRef) {
+    let client = null
+    try {
+      const host = broker.host
+      const tcp_port = broker.tcp_port
+      const ws_port = broker.ws_port
+      const connectUrl = isElectron ? `mqtt://${host}:${tcp_port}` : `ws://${host}:${ws_port}`
+      const mqttModule = isElectron ? await import('mqtt') : await import('mqtt/dist/mqtt')
+      brokerRef.current = broker
+      client = mqttModule.connect(connectUrl, {
+        keepalive: 20,
+        reconnectPeriod: 1000,
+        connectTimeout: 4000,
+        clean: true,
+        resubscribe: true
+      })
+      clientRef.current = client
+
+      client.on('connect', () => {
+        if (!mountedRef.current) return
+        reconnectingRef.current = false
+        setConnStatus('connected')
+        subscriptions.forEach((topic) => client.subscribe(topic))
+      })
+
+      client.on('message', (topic, payload) => {
+        const msg = payload.toString()
+        if (topic === 'nomad/status') {
+          try {
+            const obj = JSON.parse(msg)
+            setBackendStatus(obj)
+            setBackendHeartbeatTs(Date.now())
+          } catch (e) {
+            setBackendStatus({raw: msg})
+            setBackendHeartbeatTs(Date.now())
+          }
+        }
+        if (topic.startsWith('Nomad/waypoints/') && topic.endsWith('/validation')) {
+          try {
+            const obj = JSON.parse(msg)
+            if (addToastRef.current) {
+              addToastRef.current({title: 'Waypoint validation', body: `${obj.filename}: ${obj.valid ? 'OK' : 'FAIL'} (${obj.count} pts)`})
+            }
+          } catch (e) {
+            if (addToastRef.current) {
+              addToastRef.current({title: 'Waypoint validation', body: msg})
+            }
+          }
+        }
+        if (topic.startsWith('Nomad/missions/downloaded/')) {
+          try {
+            const obj = JSON.parse(msg)
+            setDownloadedMissions((prev) => [obj].concat(prev).slice(0, 10))
+            if (addToastRef.current) {
+              addToastRef.current({title: 'Mission downloaded', body: `From sysid ${obj.sysid}: ${obj.count} waypoints`})
+            }
+          } catch (e) {
+            if (addToastRef.current) {
+              addToastRef.current({title: 'Mission download', body: msg})
+            }
+          }
+        }
+        lastMessageTsRef.current = Date.now()
+        telemetryBufferRef.current.push({topic, msg, ts: Date.now()})
+      })
+
+      client.on('reconnect', () => setConnStatus('reconnecting'))
+      client.on('close', () => setConnStatus('disconnected'))
+      client.on('error', (e) => {
+        console.error('mqtt error', e)
+        setBrokerError(String(e))
+      })
+    } catch (e) {
+      console.error('failed to start mqtt client', e)
+      setBrokerError(String(e))
+    }
+    return client
+  }
+
+  useEffect(() => {
+    let mounted = true
+
+    let statusInterval = null
+    let telemetryFlushInterval = null
+    let telemetryWatchdogInterval = null
+    async function pollStatus() {
+      try {
+        const r = await fetch('/api/status')
+        if (!r.ok) return
+        const j = await r.json()
+        setBackendStatus(j)
+        setBackendHeartbeatTs(Date.now())
+      } catch (e) {
+        // ignore
+      }
+    }
+    pollStatus()
+    statusInterval = setInterval(pollStatus, 3000)
+    telemetryFlushInterval = setInterval(() => {
+      const pending = telemetryBufferRef.current
+      if (!pending.length) return
+      telemetryBufferRef.current = []
+      setTelemetry((s) => pending.concat(s).slice(0, 500))
+    }, 120)
+    telemetryWatchdogInterval = setInterval(async () => {
+      if (connStatusRef.current !== 'connected') return
+      if (!brokerRef.current || !clientRef.current) return
+      const lastTs = lastMessageTsRef.current
+      if (!lastTs) return
+      const idleMs = Date.now() - lastTs
+      if (idleMs < 8000) return
+      if (reconnectingRef.current) return
+
+      reconnectingRef.current = true
+      setConnStatus('reconnecting')
+      try {
+        clientRef.current.end(true)
+      } catch (e) {
+        // ignore
+      }
+      try {
+        await connectWithBroker(brokerRef.current, {current: mounted})
+      } catch (e) {
+        reconnectingRef.current = false
+      }
+    }, 2000)
+
+    async function startClient() {
+      try {
+        const broker = await fetchBrokerConfig()
+        if (!broker) {
+          setConnStatus('no-broker-config')
+          return
+        }
+        await connectWithBroker(broker, { current: mounted })
+      } catch (e) {
+        console.error('failed to start mqtt client', e)
+      }
+    }
+
+    startClient()
+
+    return () => {
+      try {
+        if (clientRef.current) clientRef.current.end()
+      } catch (e) {
+        // ignore
+      }
+      mounted = false
+      if (statusInterval) clearInterval(statusInterval)
+      if (telemetryFlushInterval) clearInterval(telemetryFlushInterval)
+      if (telemetryWatchdogInterval) clearInterval(telemetryWatchdogInterval)
+    }
+  }, [])
+
+  const retryFetchBroker = async () => {
+    setBrokerError(null)
+    setBrokerMissing(false)
+    setConnStatus('reloading-broker-config')
+    const b = await fetchBrokerConfig()
+    if (b) {
+      setConnStatus('connecting')
+      try {
+        const client = await connectWithBroker(b, { current: true })
+        if (client) {
+          setConnStatus('connected')
+        }
+      } catch (e) {
+        console.error('connectWithBroker failed', e)
+        setBrokerError(String(e))
+        setConnStatus('connect-failed')
+      }
+    } else {
+      setConnStatus('no-broker-config')
+    }
+  }
+
+  return {
+    connStatus,
+    telemetry,
+    backendStatus,
+    backendHeartbeatTs,
+    brokerConfig,
+    brokerMissing,
+    brokerError,
+    brokerStatus,
+    downloadedMissions,
+    clientRef,
+    retryFetchBroker,
+    fetchBrokerConfig,
+    connectWithBroker
+  }
+}

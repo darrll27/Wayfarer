@@ -620,6 +620,22 @@ def create_demo_mission():
 router_proc = None
 
 
+def _pipe_stream_to_log(stream, log_path: Path, label: str):
+    """Continuously copy process output stream to a log file with timestamps."""
+    try:
+        with open(log_path, 'a', buffering=1) as out_f:
+            out_f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [config_api] attached {label}\n")
+            while True:
+                line = stream.readline()
+                if not line:
+                    break
+                ts = time.strftime('%Y-%m-%d %H:%M:%S')
+                out_f.write(f"[{ts}] {line}")
+            out_f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [config_api] {label} closed\n")
+    except Exception as e:
+        print(f'[config_api] error logging {label}: {e}')
+
+
 @app.on_event('startup')
 def _start_router_process():
     """Start the router as a subprocess so module import semantics match running
@@ -639,7 +655,8 @@ def _start_router_process():
             env['PYTHONPATH'] = str(repo_root)
             # use same python executable as the running process
             python_exec = sys.executable or 'python3'
-            cmd = [python_exec, str(repo_root / 'backend' / 'mav_router' / 'run_router.py')]
+            env['PYTHONUNBUFFERED'] = '1'
+            cmd = [python_exec, '-u', str(repo_root / 'backend' / 'mav_router' / 'run_router.py')]
             
             # Create log files for router output
             log_dir = repo_root / 'logs'
@@ -650,27 +667,19 @@ def _start_router_process():
             print(f'[config_api] starting router, logs: {stdout_log}, {stderr_log}')
             router_proc = subprocess.Popen(cmd, cwd=str(repo_root), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-            # Start a thread to read and log router output
-            def monitor_router_output():
-                try:
-                    with open(stdout_log, 'w') as stdout_f, open(stderr_log, 'w') as stderr_f:
-                        while router_proc.poll() is None:
-                            if router_proc.stdout:
-                                line = router_proc.stdout.readline()
-                                if line:
-                                    stdout_f.write(f'{line}')
-                                    stdout_f.flush()
-                            if router_proc.stderr:
-                                line = router_proc.stderr.readline()
-                                if line:
-                                    stderr_f.write(f'{line}')
-                                    stderr_f.flush()
-                            time.sleep(0.1)
-                except Exception as e:
-                    print(f'[config_api] error monitoring router output: {e}')
-
-            monitor_thread = threading.Thread(target=monitor_router_output, daemon=True)
-            monitor_thread.start()
+            # Start separate stream readers so one stream cannot block the other.
+            if router_proc.stdout:
+                threading.Thread(
+                    target=_pipe_stream_to_log,
+                    args=(router_proc.stdout, stdout_log, 'router.stdout'),
+                    daemon=True,
+                ).start()
+            if router_proc.stderr:
+                threading.Thread(
+                    target=_pipe_stream_to_log,
+                    args=(router_proc.stderr, stderr_log, 'router.stderr'),
+                    daemon=True,
+                ).start()
 
             print(f'[config_api] started router subprocess pid={router_proc.pid}')
             # Start a lightweight MQTT subscriber to capture onboard missions published by the router
