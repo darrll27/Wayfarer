@@ -23,6 +23,12 @@ function formatDop(value) {
   return (n / 100).toFixed(1)
 }
 
+function getBatteryPercent(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  return Math.max(0, Math.min(100, Math.round(n)))
+}
+
 export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypointsDemo}) {
   const now = Date.now()
   const birds = birdList || []
@@ -83,6 +89,7 @@ export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypoint
           ) : (
             birds.map((bird) => {
               const {isLive, isReady} = evaluateBirdStatus(bird, now)
+              const batteryPct = getBatteryPercent(bird.metrics && bird.metrics.battery)
               return (
                 <div key={bird.sysid} className="summary-bird-card">
                   <div className="summary-bird-head">
@@ -98,6 +105,15 @@ export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypoint
                   </div>
                   <div className="bird-meta">
                     HDOP {formatDop(bird.metrics && bird.metrics.eph)} · VDOP {formatDop(bird.metrics && bird.metrics.epv)}
+                  </div>
+                  <div className="summary-bird-row battery-row">
+                    <span className="bird-meta">Battery</span>
+                    <span className="battery-inline">
+                      <span className="battery-meter" aria-label="battery level">
+                        <span className="battery-fill" style={{width: `${batteryPct ?? 0}%`}} />
+                      </span>
+                      <span className="bird-meta battery-value">{batteryPct !== null ? `${batteryPct}%` : 'n/a'}</span>
+                    </span>
                   </div>
                 </div>
               )

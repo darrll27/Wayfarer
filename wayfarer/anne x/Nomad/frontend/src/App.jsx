@@ -35,6 +35,7 @@ export default function App() {
   const [selectedMode, setSelectedMode] = useState('AUTO')
   const [armReady, setArmReady] = useState(false)
   const [mapScope, setMapScope] = useState('all')
+  const [qgcMapView, setQgcMapView] = useState('map')
   const [showFlightPaths, setShowFlightPaths] = useState(true)
   const [selectedFile, setSelectedFile] = useState(null)
   const [sendSysid, setSendSysid] = useState(1)
@@ -52,6 +53,7 @@ export default function App() {
   const mapLayersRef = useRef([])
   const qgcMapRef = useRef(null)
   const qgcMapLayersRef = useRef([])
+  const qgcBaseLayerRef = useRef(null)
 
   const addToast = useCallback((t) => {
     const id = Date.now() + Math.random()
@@ -258,23 +260,34 @@ export default function App() {
       })
       qgcMapLayersRef.current = []
     }
-    const birds = mapScope === 'selected' && selectedBirdRecord ? [selectedBirdRecord] : birdList
+    const birds = birdList
+    const highlightSelected = mapScope === 'selected' && selectedBirdRecord
     birds.forEach(bird => {
       if (bird.lat == null || bird.lon == null) return
-      const marker = window.L.circleMarker([bird.lat, bird.lon], {
-        radius: 6,
-        color: '#5eead4',
-        fillColor: '#5eead4',
-        fillOpacity: 0.9
+      const heading = Number(bird.metrics && bird.metrics.heading)
+      const rotation = Number.isFinite(heading) ? heading : 0
+      const birdLabel = String(bird.sysid)
+      const isSelected = highlightSelected && String(selectedBirdRecord.sysid) === String(bird.sysid)
+      const iconStateClass = highlightSelected ? (isSelected ? 'selected' : 'muted') : ''
+      const idStateClass = highlightSelected ? (isSelected ? 'selected' : 'muted') : ''
+      const icon = window.L.divIcon({
+        className: 'qgc-bird-marker',
+        html: `<div class="qgc-bird-wrap"><div class="qgc-bird-icon ${iconStateClass}" style="transform: rotate(${rotation}deg)">➤</div><div class="qgc-bird-id ${idStateClass}">${birdLabel}</div></div>`,
+        iconSize: [54, 40],
+        iconAnchor: [18, 18]
+      })
+      const marker = window.L.marker([bird.lat, bird.lon], {
+        icon,
+        zIndexOffset: isSelected ? 1000 : 0
       }).addTo(qgcMapRef.current)
       marker.bindTooltip(`Bird ${bird.sysid}`, {permanent: false})
       qgcMapLayersRef.current.push(marker)
     })
   }
 
-  const focusQgcMapOnBirds = useCallback(() => {
+  const focusQgcMapOnBirds = useCallback((scope = mapScope) => {
     if (!window.L || !qgcMapRef.current) return
-    const birds = mapScope === 'selected' && selectedBirdRecord ? [selectedBirdRecord] : birdList
+    const birds = scope === 'selected' && selectedBirdRecord ? [selectedBirdRecord] : birdList
     const points = birds
       .filter(bird => bird.lat != null && bird.lon != null)
       .map(bird => [bird.lat, bird.lon])
@@ -282,6 +295,36 @@ export default function App() {
     const bounds = window.L.latLngBounds(points)
     qgcMapRef.current.fitBounds(bounds.pad(0.3))
   }, [mapScope, selectedBirdRecord, birdList])
+
+  const setQgcScopeAndFocus = useCallback((scope) => {
+    setMapScope(scope)
+    // Trigger fit specifically on user click, not on every state refresh.
+    setTimeout(() => {
+      focusQgcMapOnBirds(scope)
+    }, 0)
+  }, [focusQgcMapOnBirds])
+
+  const updateQgcBaseLayer = useCallback(() => {
+    if (!window.L || !qgcMapRef.current) return
+    if (qgcBaseLayerRef.current) {
+      try { qgcMapRef.current.removeLayer(qgcBaseLayerRef.current) } catch (e) {}
+      qgcBaseLayerRef.current = null
+    }
+    const isSatellite = qgcMapView === 'satellite'
+    const layer = isSatellite
+      ? window.L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Tiles &copy; Esri',
+        maxNativeZoom: 19,
+        maxZoom: 28
+      })
+      : window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxNativeZoom: 19,
+        maxZoom: 28
+      })
+    layer.addTo(qgcMapRef.current)
+    qgcBaseLayerRef.current = layer
+  }, [qgcMapView])
 
   // initialize map when Missions workspace is opened
   useEffect(() => {
@@ -316,6 +359,7 @@ export default function App() {
       window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors'
       }).addTo(mapRef.current)
+      window.L.control.scale({position: 'bottomleft', metric: true, imperial: false}).addTo(mapRef.current)
 
       loadWaypointFiles()
     }
@@ -350,14 +394,18 @@ export default function App() {
         setTimeout(setup, 200)
         return
       }
-      qgcMapRef.current = window.L.map('qgc-map', {zoomControl: true}).setView([37.4680, -122.0870], 14)
-      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap contributors'
-      }).addTo(qgcMapRef.current)
+      qgcMapRef.current = window.L.map('qgc-map', {
+        zoomControl: true,
+        maxZoom: 28,
+        zoomSnap: 0.1,
+        zoomDelta: 0.1
+      }).setView([37.4680, -122.0870], 14)
+      updateQgcBaseLayer()
+      window.L.control.scale({position: 'bottomleft', metric: true, imperial: false}).addTo(qgcMapRef.current)
       updateQgcMapMarkers()
     }
     setup()
-  }, [workspace])
+  }, [workspace, updateQgcBaseLayer])
 
   useEffect(() => {
     if (workspace === 'missions' && mapRef.current) {
@@ -371,6 +419,11 @@ export default function App() {
       updateQgcMapMarkers()
     }
   }, [telemetry, workspace, mapScope, selectedBird, birdList])
+
+  useEffect(() => {
+    if (workspace !== 'qgc' || !qgcMapRef.current) return
+    updateQgcBaseLayer()
+  }, [workspace, qgcMapView, updateQgcBaseLayer])
 
   // Waypoint manager state & helpers
   async function loadWaypointFiles() {
@@ -575,8 +628,9 @@ export default function App() {
               sendModeCommand={sendModeCommand}
               sendArmCommand={sendArmCommand}
               mapScope={mapScope}
-              setMapScope={setMapScope}
-              selectedBirdTelemetry={selectedBirdTelemetry}
+              setQgcScopeAndFocus={setQgcScopeAndFocus}
+              qgcMapView={qgcMapView}
+              setQgcMapView={setQgcMapView}
               focusQgcMapOnBirds={focusQgcMapOnBirds}
             />
           )}

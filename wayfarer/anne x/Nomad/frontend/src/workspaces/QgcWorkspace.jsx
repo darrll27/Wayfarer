@@ -11,12 +11,13 @@ export default function QgcWorkspace({
   sendModeCommand,
   sendArmCommand,
   mapScope,
-  setMapScope,
-  selectedBirdTelemetry,
+  setQgcScopeAndFocus,
+  qgcMapView,
+  setQgcMapView,
   focusQgcMapOnBirds
 }) {
   return (
-    <div className="grid">
+    <div className="grid qgc-grid">
       <Panel title="QGC Control">
         <div className="controls">
           <div className="status-grid">
@@ -53,29 +54,20 @@ export default function QgcWorkspace({
           </div>
         </div>
       </Panel>
-      <Panel title="Multi-drone Map" actions={(
-        <div className="segmented">
-          <button className={mapScope === 'all' ? 'active' : ''} onClick={() => setMapScope('all')}>All birds</button>
-          <button className={mapScope === 'selected' ? 'active' : ''} onClick={() => setMapScope('selected')}>Selected only</button>
-          <button onClick={focusQgcMapOnBirds}>Focus birds</button>
+      <Panel className="qgc-map-panel" title="Multi-drone Map" actions={(
+        <div className="panel-actions">
+          <div className="segmented">
+            <button className={qgcMapView === 'map' ? 'active' : ''} onClick={() => setQgcMapView('map')}>Map</button>
+            <button className={qgcMapView === 'satellite' ? 'active' : ''} onClick={() => setQgcMapView('satellite')}>Satellite</button>
+          </div>
+          <div className="segmented">
+            <button className={mapScope === 'all' ? 'active' : ''} onClick={() => setQgcScopeAndFocus('all')}>All birds</button>
+            <button className={mapScope === 'selected' ? 'active' : ''} onClick={() => setQgcScopeAndFocus('selected')}>Selected only</button>
+            <button onClick={focusQgcMapOnBirds}>Focus birds</button>
+          </div>
         </div>
       )}>
         <div id="qgc-map" className="map-shell" />
-      </Panel>
-      <Panel title="Selected Bird Stream">
-        <div className="telemetry-list">
-          {selectedBirdTelemetry.length === 0 ? (
-            <div className="empty">No telemetry for this bird yet.</div>
-          ) : (
-            selectedBirdTelemetry.map((t, i) => (
-              <div key={i} className="telemetry-row">
-                <div className="telemetry-time">{new Date(t.ts).toLocaleTimeString()}</div>
-                <div className="telemetry-topic">{t.topic}</div>
-                <div className="telemetry-msg">{t.msg}</div>
-              </div>
-            ))
-          )}
-        </div>
       </Panel>
     </div>
   )
