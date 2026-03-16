@@ -1,100 +1,100 @@
-# Wayfarer — MQTT bridge, Pathfinder mission controller, and Houston dashboard
+# Nomad
 
-This repo contains three pieces that work together:
+Nomad is an MQTT-backed MAVLink router with a Python backend and an Electron/React frontend. This repository has been reduced to the Nomad project only.
 
-- Wayfarer: Lightweight discovery‑driven MAVLink⇄MQTT bridge (Python)
-- Pathfinder: Mission controller that uploads missions and issues commands via MQTT (Python)
-- Houston: Web telemetry dashboard with a built‑in MQTT broker (Node/React)
+## Repository layout
 
-Highlights
-- Device‑first topics (auto‑discovery; no per‑device config)
-- Clean topic model: `telem/` for telemetry, `cmd/` for commands
-- Canonical mission upload API at the root: `{topic_prefix}/mission/upload`
-- Map overlays in Houston: mission paths, current checkpoint, labels (group · sysid), and a sysid picker with a mission debug panel
+- `backend/` — FastAPI config API, MAVLink router, transport layer, mission upload/download logic, waypoint validation
+- `frontend/` — Vite/Electron React app and local Aedes broker helper scripts
+- `config/` — broker and runtime configuration
+- `missions/` — mission and waypoint YAML files used by the backend and tests
+- `tests/` and `backend/tests/` — unit and integration-oriented Python tests
+- `hil_sil_tests/` — HIL/SIL test harness and reports
 
-## Quick start
+## Development
 
-1) Start Houston (broker + UI)
+Python requirement:
+
+- `python3` must be installed on the machine.
+- For normal root dev flows, manual virtualenv activation is optional.
+
+Root dev startup:
+
+- `npm start`, `npm run dev`, and `npm run dev:desktop` go through `scripts/dev.sh`.
+- That script creates `./.venv` if needed, installs or refreshes `requirements.txt`, and launches the backend with `./.venv/bin/python`.
+
+If you just want to start the full stack, use:
 
 ```bash
-cd Houston
+npm start
+```
+
+Manual Python setup is only needed if you want to run backend commands yourself outside the root dev script:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Install frontend dependencies:
+
+```bash
+cd frontend
 npm install
+cd ..
+```
+
+Useful variants:
+
+```bash
+npm run dev
+npm run dev:desktop
 npm run build
-npm run start    # HTTP:4000, WS MQTT:9002/mqtt, TCP MQTT:1884
+npm run start:build
+npm run backend+broker
+bash ./scripts/dev.sh desktop
+bash ./scripts/dev.sh backend-only
+.venv/bin/python -m uvicorn backend.config_api:app --reload --port 8000
+.venv/bin/python backend/mav_router/run_router.py
 ```
 
-Open http://localhost:4000
+## Broker settings
 
-2) Start Wayfarer (bridge)
+Broker configuration is stored in `config/broker.json` and can be edited from the **Settings** workspace in the UI.
 
-```bash
-pip install -e .
-wayfarer -c examples/wayfarer.config.houston.yaml
+Change timing:
+
+- Config values are saved immediately.
+- Router reconnect/restart is attempted immediately.
+- Broker mode changes, and whether the local Aedes broker is spawned, should be treated as taking full effect on the next app restart.
+
+Expected shape:
+
+```json
+{
+	"mode": "internal",
+	"host": "localhost",
+	"tcp_port": 1883,
+	"ws_port": 1884,
+	"username": null,
+	"password": null,
+	"notes": "mode: internal => spawn local Aedes; external => do not spawn (assume external broker at host:tcp_port/ws_port)"
+}
 ```
 
-3) Launch Pathfinder (mission controller)
+Port usage:
 
-```bash
-python pathfinder/main.py -c pathfinder/pathfinder.config.yaml --run
-```
+- `tcp_port`: native MQTT TCP port used by backend services and router-side MQTT clients.
+- `ws_port`: MQTT-over-WebSocket port used by the frontend renderer client.
 
-## Topics (minimal)
+Mode behavior:
 
-- Mission upload (root, required for overlays)
-    - Topic: `{prefix}/mission/upload`
-    - Payload: `{ sysid: <number>, mission_items: [ { lat, lon, alt, ... }, ... ] }`
-
-- Heartbeat (alive)
-    - Topic: `{prefix}/devices/mav_sys<sysid>/telem/state/heartbeat`
-    - Payload: `{}`
-
-- GPS (any of):
-    - `{prefix}/devices/mav_sys<sysid>/telem/raw/mavlink/GLOBAL_POSITION_INT`
-    - `{prefix}/devices/mav_sys<sysid>/telem/raw/mavlink/GPS_RAW_INT`
-    - `{prefix}/devices/mav_sys<sysid>/telem/raw/mavlink/GPS2_RAW`
-
-- Current checkpoint (optional)
-    - `{prefix}/devices/mav_sys<sysid>/telem/raw/mavlink/MISSION_CURRENT`
-    - `{ seq: <number> }`
-
-- Aggregated Pathfinder state (optional visual aid)
-    - `{prefix}/pathfinder/sysid_<sysid>/state`
-    - `{ group, sysid, checkpoint, lat, lon, alt, t }`
-
-## Simulate telemetry quickly
-
-Publish these while Houston is open to see a localized, alive drone with overlays:
-
-- Mission upload
-    - Topic: `wayfarer/v1/mission/upload`
-    - Payload:
-        ```json
-        { "sysid": 6, "mission_items": [
-            { "lat": 37.412545, "lon": -121.998,   "alt": 52 },
-            { "lat": 37.413045, "lon": -121.9982, "alt": 57 },
-            { "lat": 37.413545, "lon": -121.9984, "alt": 61 },
-            { "lat": 37.414045, "lon": -121.9986, "alt": 54 }
-        ]}
-        ```
-
-- Heartbeat
-    - Topic: `wayfarer/v1/devices/mav_sys6/telem/state/heartbeat`
-    - Payload: `{}`
-
-- GPS
-    - Topic: `wayfarer/v1/devices/mav_sys6/telem/raw/mavlink/GLOBAL_POSITION_INT`
-    - Payload: `{ "lat": 37.4219999, "lon": -122.0840575, "alt": 32.1 }`
-
-- Current checkpoint (optional)
-    - Topic: `wayfarer/v1/devices/mav_sys6/telem/raw/mavlink/MISSION_CURRENT`
-    - Payload: `{ "seq": 0 }`
-
-## Component docs
-
-- Houston: `houston/README.md` — broker ports, pages, and UI details (Map overlays, sysid picker, debug panel)
-- Wayfarer: `wayfarer/README.md` — bridge topics and config
-- Pathfinder: `pathfinder/README.md` — groups, waypoints, mission upload behavior
+- `internal`: local Aedes broker is started by the dev stack.
+- `external`: local Aedes is not started; Nomad connects to the configured external broker.
 
 ## Notes
-- Mission uploads are not retained by default; keep Houston open to cache overlays (Houston keeps mission cache for 10 minutes).
-- Overlays require absolute waypoints (lat/lon). Relative‑only missions won’t draw yet; can be enabled with an origin transform.
+
+- The previous nested Nomad virtual environment was intentionally not moved. Python virtual environments embed absolute paths, so use the new root `.venv`.
+- The authoritative MQTT topic schema and project constraints are documented in `.github/copilot-instructions.md`.
+- Additional project state and roadmap notes remain in `project_status.readme.md`.

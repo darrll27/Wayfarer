@@ -1,0 +1,17 @@
+{
+  "name": "nomad-dev-root",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "npm run dev:desktop",
+    "dev": "bash ./scripts/dev.sh",
+    "dev:desktop": "bash ./scripts/dev.sh desktop",
+    "build": "npm --prefix frontend run build",
+    "start:build": "npm run build && npm run dev:desktop",
+    "backend": "uvicorn backend.config_api:app --reload --port 8000",
+    "backend+broker": "bash ./scripts/dev.sh backend-only"
+  },
+  "devDependencies": {
+    "baseline-browser-mapping": "^2.10.0"
+  }
+}
