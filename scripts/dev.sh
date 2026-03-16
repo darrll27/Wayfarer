@@ -103,6 +103,14 @@ echo "[dev] broker log: $LOG_DIR/aedes.log"
 (node scripts/aedes_server.js 2>&1 | timestamp_pipe "$LOG_DIR/aedes.log") &
 PIDS+=("$!")
 
+if [[ "$DESKTOP_MODE" == "false" ]]; then
+  echo "Starting router backend"
+  cd "$ROOT_DIR"
+  echo "[dev] router log: $LOG_DIR/router.log"
+  ("$VENV_DIR/bin/python" backend/mav_router/run_router.py 2>&1 | timestamp_pipe "$LOG_DIR/router.log") &
+  PIDS+=("$!")
+fi
+
 if [ "$BACKEND_ONLY" = true ]; then
   echo "Backend-only mode: started backend and broker, waiting..."
   # Wait indefinitely

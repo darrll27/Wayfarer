@@ -182,6 +182,30 @@ button, input, select, textarea {
   gap: var(--gap);
 }
 
+.missions-layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.missions-section {
+  display: grid;
+  gap: var(--gap);
+}
+
+.missions-top {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.missions-bottom {
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr);
+  align-items: start;
+}
+
+.missions-map-panel .map-shell {
+  height: min(52vh, 520px);
+}
+
 .panel {
   background: linear-gradient(180deg, rgba(20, 30, 52, 0.95), rgba(14, 22, 38, 0.95));
   border: 1px solid var(--border);
@@ -407,6 +431,53 @@ button.ghost {
   gap: 10px;
 }
 
+.group-separator {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 6px 0 2px;
+}
+
+.group-separator::before,
+.group-separator::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: linear-gradient(90deg, rgba(251, 191, 36, 0.1), rgba(251, 191, 36, 0.45), rgba(251, 191, 36, 0.1));
+}
+
+.group-separator-air {
+  color: #7dd3fc;
+}
+
+.group-separator-air::before,
+.group-separator-air::after {
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.1), rgba(56, 189, 248, 0.55), rgba(56, 189, 248, 0.1));
+}
+
+.group-separator-ground {
+  color: #fbbf24;
+}
+
+.group-separator-ground::before,
+.group-separator-ground::after {
+  background: linear-gradient(90deg, rgba(251, 191, 36, 0.1), rgba(251, 191, 36, 0.55), rgba(251, 191, 36, 0.1));
+}
+
+.summary-separator {
+  margin-top: 12px;
+}
+
+.location-separator {
+  margin-top: 2px;
+}
+
 .summary-bird-card {
   padding: 10px;
   border-radius: var(--radius-sm);
@@ -415,6 +486,15 @@ button.ghost {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.summary-air-card {
+  border-color: rgba(56, 189, 248, 0.18);
+}
+
+.summary-nonbird-card {
+  background: rgba(42, 30, 10, 0.28);
+  border-color: rgba(251, 191, 36, 0.22);
 }
 
 .summary-bird-head {
@@ -701,6 +781,60 @@ button.ghost {
   gap: 8px;
 }
 
+.download-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.download-status-row {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: rgba(6, 10, 18, 0.45);
+}
+
+.download-status-main {
+  font-weight: 600;
+}
+
+.download-status-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mission-profile {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mission-profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mission-profile-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(6, 10, 18, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.mission-profile-seq {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.mission-profile-body {
+  min-width: 0;
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -730,6 +864,12 @@ button.ghost {
 
 .qgc-grid .qgc-map-panel .map-shell {
   height: min(78vh, 780px);
+}
+
+@media (max-width: 900px) {
+  .missions-bottom {
+    grid-template-columns: 1fr;
+  }
 }
 
 .qgc-bird-marker {
@@ -773,6 +913,12 @@ button.ghost {
   opacity: 0.75;
 }
 
+.qgc-bird-icon.nonbird {
+  border-color: rgba(251, 191, 36, 0.85);
+  color: #fef3c7;
+  background: rgba(66, 32, 6, 0.92);
+}
+
 .qgc-bird-id {
   position: absolute;
   right: 0;
@@ -799,6 +945,12 @@ button.ghost {
   color: #e2e8f0;
   background: rgba(30, 41, 59, 0.92);
   opacity: 0.78;
+}
+
+.qgc-bird-id.nonbird {
+  border-color: rgba(251, 191, 36, 0.7);
+  color: #fef3c7;
+  background: rgba(69, 39, 11, 0.95);
 }
 
 .app-footer {

@@ -6,6 +6,8 @@ export default function SettingsWorkspace({
   uploadRawWaypoint,
   dataLossGraceMs,
   setDataLossGraceMs,
+  systemRange,
+  setSystemRange,
   brokerConfig,
   saveBrokerConfig
 }) {
@@ -174,6 +176,41 @@ export default function SettingsWorkspace({
               }}
               className="input"
             />
+          </div>
+          <div className="field">
+            <label>Ground sysid range</label>
+            <div className="field-row">
+              <input
+                type="number"
+                min="1"
+                max="255"
+                value={systemRange.start}
+                onChange={(e) => {
+                  const next = Number(e.target.value)
+                  if (Number.isFinite(next)) {
+                    setSystemRange((current) => ({...current, start: next}))
+                  }
+                }}
+                className="input"
+              />
+              <span className="label">to</span>
+              <input
+                type="number"
+                min="1"
+                max="255"
+                value={systemRange.end}
+                onChange={(e) => {
+                  const next = Number(e.target.value)
+                  if (Number.isFinite(next)) {
+                    setSystemRange((current) => ({...current, end: next}))
+                  }
+                }}
+                className="input"
+              />
+            </div>
+            <div className="field-help">
+              Sysids inside this inclusive range are grouped under `Ground`. Everything else is grouped under `Air`.
+            </div>
           </div>
           <div className="field">
             <label>Upload a waypoint YAML file (.yaml/.yml)</label>

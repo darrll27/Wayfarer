@@ -1,7 +1,8 @@
 [
   "device/#",
+  "command/+/+/ack",
   "nomad/status",
   "Nomad/config",
   "Nomad/waypoints/#",
-  "Nomad/missions/downloaded/+"
+  "Nomad/missions/downloaded/#"
 ]

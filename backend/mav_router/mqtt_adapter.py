@@ -42,6 +42,20 @@ class MissionManager:
         # Download states: sysid -> {'state', 'mission', 'start_time', 'target_comp'}
         self.download_states: Dict[int, Dict] = {}
 
+    def _publish_download_status(self, sysid: int, compid: int, status: str, extra: Dict[str, Any] | None = None):
+        payload = {
+            'sysid': sysid,
+            'compid': compid,
+            'status': status,
+            'ts': time.time(),
+        }
+        if extra:
+            payload.update(extra)
+        try:
+            self.mqtt_client.publish(f"Nomad/missions/downloaded/{sysid}/status", json.dumps(payload))
+        except Exception as e:
+            print(f"[mission_manager] failed to publish download status ({status}) for {sysid}: {e}")
+
     def start_mission_upload(self, sysid: int, compid: int, mission: list, expected_hash: str = None):
         """Start mission upload with optional hash verification."""
         self.upload_states[sysid] = {
@@ -79,7 +93,9 @@ class MissionManager:
 
         if self._send_to_drone(sysid, out_bytes):
             print(f"[mission_manager] requested mission list from {sysid}")
+            self._publish_download_status(sysid, compid, 'request_sent', {'phase': 'mission_request_list'})
             return True
+        self._publish_download_status(sysid, compid, 'request_send_failed', {'phase': 'mission_request_list'})
         return False
 
     def handle_mission_ack(self, sysid: int, compid: int):
@@ -152,6 +168,7 @@ class MissionManager:
                     out_bytes = mavlink_encoder.encode_mission_request_int(sysid, compid, next_seq, src_sys=src_sys, src_comp=src_comp)
                     if not self._send_to_drone(sysid, out_bytes):
                         print(f"[mission_manager] failed to request next item seq={next_seq} for {sysid} — target not observed or send failed")
+                        self._publish_download_status(sysid, compid, 'request_send_failed', {'phase': 'mission_request_int', 'seq': next_seq})
 
     def _complete_download(self, sysid: int, compid: int, state: dict):
         """Complete mission download and publish results."""
@@ -255,8 +272,10 @@ class MissionManager:
 
         if self._send_to_drone(sysid, out_bytes):
             print(f"[mission_manager] requested mission item seq=0 for {sysid}")
+            self._publish_download_status(sysid, compid, 'request_sent', {'phase': 'mission_request_int', 'seq': 0})
         else:
             print(f"[mission_manager] failed to send mission request for {sysid} (no observed port or send error)")
+            self._publish_download_status(sysid, compid, 'request_send_failed', {'phase': 'mission_request_int', 'seq': 0})
 
 
 class MQTTAdapter:
@@ -297,6 +316,200 @@ class MQTTAdapter:
         self._mav_parsers = {}  # transport_name -> parser instance
         # Mission manager for handling upload/download operations
         self.mission_manager = MissionManager(cfg, router, ports, self.client)
+
+    def _source_topic(self, src_sys: int | None, src_comp: int | None, dest_sys: int | None, dest_comp: int | None, msg_type: str, port_name: str) -> str:
+        return (
+            f"sources/source_sysid_{src_sys or 0}/"
+            f"source_compid_{src_comp or 0}/"
+            f"dest_sysid_{dest_sys or 0}/"
+            f"dest_compid_{dest_comp or 0}/"
+            f"{msg_type}/{port_name}"
+        )
+
+    def _publish_decoded_message(self, name: str, addr, msg_type: str, fields: Dict[str, Any], src_sys: int | None, src_comp: int | None):
+        dest_sys = int(fields.get("target_system", 0) or fields.get("target_sys", 0) or 0)
+        dest_comp = int(fields.get("target_component", 0) or fields.get("target_comp", 0) or 0)
+        sus = src_sys or 0
+        suc = src_comp or 0
+        device_topic_base = f"device/sysid_{sus}/compid_{suc}/{msg_type}"
+        device_publishes = 0
+        source_publishes = 0
+
+        try:
+            self.client.publish(device_topic_base, json.dumps({"fields": fields, "src_addr": addr, "port": name}))
+            device_publishes += 1
+        except Exception:
+            pass
+
+        if self._publish_fields:
+            for k, v in (fields or {}).items():
+                try:
+                    self.client.publish(f"{device_topic_base}/{k}", json.dumps(v))
+                    device_publishes += 1
+                except Exception:
+                    pass
+
+        try:
+            self.client.publish(
+                self._source_topic(sus, suc, dest_sys, dest_comp, msg_type, name),
+                json.dumps({"fields": fields, "src_addr": addr}),
+            )
+            source_publishes += 1
+        except Exception:
+            pass
+
+        if self._debug_publish_counts:
+            try:
+                print(f"[mqtt_adapter] packet from {addr} (port={name}) msg={msg_type} -> device_publishes={device_publishes} source_publishes={source_publishes}")
+            except Exception:
+                pass
+        self._total_publishes += device_publishes + source_publishes
+
+    def _encode_uplink(self, topic: str, data: Any, target_sys: int, target_comp: int) -> tuple[bytes, int, int, dict | None]:
+        out_bytes = None
+        ack_payload = None
+        if isinstance(data, dict) and (data.get("command") == "SET_MODE" or data.get("msg") == "SET_MODE" or data.get("type") == "SET_MODE"):
+            tgt_sys = int(data.get("target_sys", target_sys))
+            tgt_comp = int(data.get("target_comp", target_comp))
+            base_mode = int(data.get("base_mode", 1))
+            custom_mode = data.get("custom_mode")
+            if custom_mode is None:
+                custom_mode = self._px4_custom_mode_from_label(data.get("mode"))
+            if custom_mode is None:
+                raise ValueError(f"unknown mode label for SET_MODE: {data.get('mode')}")
+            params = [base_mode, int(custom_mode), 0, 0, 0, 0, 0]
+            src_sys, src_comp = self._resolve_src_ids(data)
+            out_bytes = mavlink_encoder.encode_command_long(
+                tgt_sys,
+                tgt_comp,
+                176,
+                params,
+                src_sys=src_sys,
+                src_comp=src_comp,
+            )
+            ack_payload = {
+                "status": "encoded",
+                "msg": "SET_MODE",
+                "bytes": len(out_bytes),
+                "base_mode": base_mode,
+                "custom_mode": int(custom_mode),
+            }
+        elif isinstance(data, dict) and (
+            data.get("msg") == "COMMAND_LONG"
+            or data.get("type") == "COMMAND_LONG"
+            or data.get("command") is not None
+        ):
+            tgt_sys = int(data.get("target_sys", target_sys))
+            tgt_comp = int(data.get("target_comp", target_comp))
+            cmd = self._mav_cmd_name_to_id(data.get("command"))
+            if cmd is None:
+                raise ValueError(f"unknown COMMAND_LONG command: {data.get('command')}")
+            params = data.get("params", [])
+            src_sys, src_comp = self._resolve_src_ids(data)
+            out_bytes = mavlink_encoder.encode_command_long(tgt_sys, tgt_comp, cmd, params, src_sys=src_sys, src_comp=src_comp)
+            ack_payload = {"status": "encoded", "msg": "COMMAND_LONG", "bytes": len(out_bytes), "command": cmd}
+        elif isinstance(data, dict) and (data.get("msg") == "MISSION_ITEM_INT" or data.get("type") == "MISSION_ITEM_INT"):
+            tgt_sys = int(data.get("target_sys", target_sys))
+            tgt_comp = int(data.get("target_comp", target_comp))
+            seq = int(data.get("seq", 0))
+            frame = int(data.get("frame", 0))
+            cmd = int(data.get("command", 16))
+            x = int(data.get("x", 0))
+            y = int(data.get("y", 0))
+            z = float(data.get("z", 0.0))
+            params = data.get("params", [])
+            src_sys, src_comp = self._resolve_src_ids(data)
+            out_bytes = mavlink_encoder.encode_mission_item_int(tgt_sys, tgt_comp, seq, frame, cmd, params=params, x=x, y=y, z=z, src_sys=src_sys, src_comp=src_comp)
+            ack_payload = {"status": "encoded", "msg": "MISSION_ITEM_INT", "bytes": len(out_bytes), "seq": seq}
+        else:
+            out_bytes = json.dumps({"topic": topic, "payload": data}).encode("utf-8")
+            tgt_sys = target_sys
+            tgt_comp = target_comp
+        return out_bytes, tgt_sys, tgt_comp, ack_payload
+
+    def _publish_command_ack(self, target_sys: int, target_comp: int, payload: dict):
+        try:
+            self.client.publish(f"command/{target_sys}/{target_comp}/ack", json.dumps(payload))
+        except Exception:
+            pass
+
+    def _resolve_command_route(self, target_sys: int) -> tuple[str | None, tuple[str, int] | None]:
+        """Resolve the outbound transport for uplink commands.
+
+        UI-originated uplink must always exit through the configured
+        command_out_port. Do not infer the route from observed target traffic.
+        """
+        forced_port = self.cfg.get("command_out_port")
+        if not forced_port:
+            return None, None
+        return forced_port, self._resolve_dest_addr(forced_port)
+
+    def _parse_device_topic_ids(self, topic: str) -> tuple[int | None, int | None]:
+        parts = topic.split("/")
+        if len(parts) < 4 or parts[0] != "device":
+            return None, None
+        try:
+            return int(parts[1]), int(parts[2])
+        except Exception:
+            pass
+        try:
+            sysid = int(str(parts[1]).removeprefix("sysid_"))
+            compid = int(str(parts[2]).removeprefix("compid_"))
+            return sysid, compid
+        except Exception:
+            return None, None
+
+    def _resolve_src_ids(self, data: Dict[str, Any] | None) -> tuple[int, int]:
+        """Resolve MAVLink source IDs with payload override support.
+
+        Frontend commands may include src_sysid/src_compid. Fall back to config.
+        """
+        src_sys = int(self.cfg.get("gcs_sysid", 255))
+        src_comp = int(self.cfg.get("gcs_compid", 1))
+        if not isinstance(data, dict):
+            return src_sys, src_comp
+        try:
+            if data.get("src_sysid") is not None:
+                src_sys = int(data.get("src_sysid"))
+            elif data.get("src_sys") is not None:
+                src_sys = int(data.get("src_sys"))
+        except Exception:
+            pass
+        try:
+            if data.get("src_compid") is not None:
+                src_comp = int(data.get("src_compid"))
+            elif data.get("src_comp") is not None:
+                src_comp = int(data.get("src_comp"))
+        except Exception:
+            pass
+        return src_sys, src_comp
+
+    def _mav_cmd_name_to_id(self, command_value: Any) -> int | None:
+        """Convert MAV_CMD string or numeric value to int command id."""
+        if command_value is None:
+            return None
+        # accept direct numeric command ids
+        try:
+            if isinstance(command_value, (int, float)):
+                return int(command_value)
+            cmd_str = str(command_value).strip()
+            if cmd_str.isdigit():
+                return int(cmd_str)
+        except Exception:
+            pass
+
+        # common command names used by frontend/control panels
+        cmd_map = {
+            "MAV_CMD_COMPONENT_ARM_DISARM": 400,
+            "MAV_CMD_NAV_TAKEOFF": 22,
+            "MAV_CMD_NAV_LAND": 21,
+            "MAV_CMD_NAV_RETURN_TO_LAUNCH": 20,
+            "MAV_CMD_DO_SET_MODE": 176,
+        }
+        try:
+            return cmd_map.get(str(command_value).strip().upper())
+        except Exception:
+            return None
 
     def _px4_custom_mode_from_label(self, mode_label: str) -> int | None:
         if not mode_label:
@@ -441,6 +654,8 @@ class MQTTAdapter:
         client.subscribe("command/+/+/download_mission")
         client.subscribe("device/+/+/MISSION_REQUEST")
         client.subscribe("device/+/+/MISSION_ACK")
+        client.subscribe("device/+/+/MISSION_COUNT")
+        client.subscribe("device/+/+/MISSION_ITEM_INT")
         # publish a summary of loaded config so UIs can pick it up
         try:
             cfg_summary = {
@@ -473,12 +688,13 @@ class MQTTAdapter:
                 data = json.loads(payload)
             except Exception:
                 data = payload
+            data_dict = data if isinstance(data, dict) else {}
 
-            # special action: load_waypoints -> validate waypoint file and publish validation result
-            if isinstance(data, dict) and data.get("action") == "load_waypoints":
-                print(f"[mqtt_adapter] load_waypoints request for target={target_sys}/{target_comp} filename={data.get('filename')} items={len(data.get('waypoints') or [])}")
-                filename = data.get("filename") or data.get("name") or "unnamed.yaml"
-                waypoints = data.get("waypoints") or data.get("mission")
+            is_load_waypoints = topic.endswith("/load_waypoints") or data_dict.get("action") == "load_waypoints"
+            if is_load_waypoints:
+                print(f"[mqtt_adapter] load_waypoints request for target={target_sys}/{target_comp} filename={data_dict.get('filename')} items={len(data_dict.get('waypoints') or [])}")
+                filename = data_dict.get("filename") or data_dict.get("name") or "unnamed.yaml"
+                waypoints = data_dict.get("waypoints") or data_dict.get("mission")
                 ok, details, norm = waypoint_validator.validate_waypoints(waypoints)
                 # compute a lightweight hash of the normalized canonical form
                 try:
@@ -509,23 +725,25 @@ class MQTTAdapter:
                     pass
                 return
 
-            # special action: download_mission -> start mission download
-            if isinstance(data, dict) and data.get("action") == "download_mission":
+            is_download_mission = topic.endswith("/download_mission") or data_dict.get("action") == "download_mission"
+            if is_download_mission:
                 print(f"[mqtt_adapter] download_mission request for target={target_sys}/{target_comp}")
-                self.mission_manager.start_mission_download(target_sys, target_comp)
+                started = self.mission_manager.start_mission_download(target_sys, target_comp)
                 # ACK back to command topic
                 try:
-                    client.publish(f"command/{parts[1]}/{parts[2]}/ack", json.dumps({"status": "download_started", "sysid": target_sys, "compid": target_comp}))
+                    client.publish(
+                        f"command/{parts[1]}/{parts[2]}/ack",
+                        json.dumps({
+                            "status": "download_started" if started else "download_request_failed",
+                            "sysid": target_sys,
+                            "compid": target_comp,
+                        })
+                    )
                 except Exception:
                     pass
                 return
 
-            # find port where target sysid was observed
-            dest_port = None
-            for p, seen in self.router.observed_sysids.items():
-                if target_sys in seen:
-                    dest_port = p
-                    break
+            dest_port, dest_addr = self._resolve_command_route(target_sys)
 
             if dest_port is None:
                 # no known port for target; queue for later delivery
@@ -537,92 +755,20 @@ class MQTTAdapter:
                 self.pending_commands.setdefault(target_sys, []).append((topic, data))
                 return
 
-            dest_addr = self._resolve_dest_addr(dest_port)
             if dest_addr is None:
                 try:
                     last_addr = getattr(self.router, 'last_addr', {})
                 except Exception:
                     last_addr = {}
-                print(f"[mqtt_adapter] no dest_addr for port {dest_port}; cannot send (last_addr={last_addr})")
+                print(f"[mqtt_adapter] no dest_addr for port {dest_port}; queueing command until route resolves (last_addr={last_addr})")
+                self.pending_commands.setdefault(target_sys, []).append((topic, data))
                 return
 
             # if payload is a JSON command describing a MAVLink message, try encoding
-            out_bytes = None
             try:
-                if isinstance(data, dict) and (data.get("command") == "SET_MODE" or data.get("msg") == "SET_MODE" or data.get("type") == "SET_MODE"):
-                    tgt_sys = int(data.get("target_sys", target_sys))
-                    tgt_comp = int(data.get("target_comp", target_comp))
-                    base_mode = int(data.get("base_mode", 1))
-                    custom_mode = data.get("custom_mode")
-                    if custom_mode is None:
-                        custom_mode = self._px4_custom_mode_from_label(data.get("mode"))
-                    if custom_mode is None:
-                        raise ValueError(f"unknown mode label for SET_MODE: {data.get('mode')}")
-                    params = [base_mode, int(custom_mode), 0, 0, 0, 0, 0]
-                    src_sys = self.cfg.get("gcs_sysid", 255)
-                    src_comp = self.cfg.get("gcs_compid", 1)
-                    out_bytes = mavlink_encoder.encode_command_long(
-                        tgt_sys,
-                        tgt_comp,
-                        176,
-                        params,
-                        src_sys=src_sys,
-                        src_comp=src_comp,
-                    )
-                    print(f"[mqtt_adapter] encoded SET_MODE -> {len(out_bytes)} bytes (target={tgt_sys}/{tgt_comp} base_mode={base_mode} custom_mode={int(custom_mode)} mode_label={data.get('mode')})")
-                    try:
-                        ack_topic = f"command/{tgt_sys}/{tgt_comp}/ack"
-                        ack_payload = json.dumps({
-                            "status": "encoded",
-                            "msg": "SET_MODE",
-                            "bytes": len(out_bytes),
-                            "base_mode": base_mode,
-                            "custom_mode": int(custom_mode),
-                        })
-                        self.client.publish(ack_topic, ack_payload)
-                    except Exception:
-                        pass
-                elif isinstance(data, dict) and (data.get("msg") == "COMMAND_LONG" or data.get("type") == "COMMAND_LONG"):
-                    # expected schema: {"msg":"COMMAND_LONG","target_sys":1,"target_comp":1,"command":400,"params":[...]} 
-                    tgt_sys = int(data.get("target_sys", target_sys))
-                    tgt_comp = int(data.get("target_comp", target_comp))
-                    cmd = int(data.get("command"))
-                    params = data.get("params", [])
-                    src_sys = self.cfg.get("gcs_sysid", 255)
-                    src_comp = self.cfg.get("gcs_compid", 1)
-                    out_bytes = mavlink_encoder.encode_command_long(tgt_sys, tgt_comp, cmd, params, src_sys=src_sys, src_comp=src_comp)
-                    print(f"[mqtt_adapter] encoded COMMAND_LONG -> {len(out_bytes)} bytes")
-                    # after encoding, publish an ACK to the command topic
-                    try:
-                        ack_topic = f"command/{tgt_sys}/{tgt_comp}/ack"
-                        ack_payload = json.dumps({"status": "encoded", "msg": "COMMAND_LONG", "bytes": len(out_bytes)})
-                        self.client.publish(ack_topic, ack_payload)
-                    except Exception:
-                        pass
-                elif isinstance(data, dict) and (data.get("msg") == "MISSION_ITEM_INT" or data.get("type") == "MISSION_ITEM_INT"):
-                    # expected schema: {"msg":"MISSION_ITEM_INT","target_sys":1,"target_comp":1,"seq":0,"frame":0,"command":16,"x":...,"y":...,"z":...,"params":[...]} 
-                    tgt_sys = int(data.get("target_sys", target_sys))
-                    tgt_comp = int(data.get("target_comp", target_comp))
-                    seq = int(data.get("seq", 0))
-                    frame = int(data.get("frame", 0))
-                    cmd = int(data.get("command", 16))
-                    x = int(data.get("x", 0))
-                    y = int(data.get("y", 0))
-                    z = float(data.get("z", 0.0))
-                    params = data.get("params", [])
-                    src_sys = self.cfg.get("gcs_sysid", 255)
-                    src_comp = self.cfg.get("gcs_compid", 1)
-                    out_bytes = mavlink_encoder.encode_mission_item_int(tgt_sys, tgt_comp, seq, frame, cmd, params=params, x=x, y=y, z=z, src_sys=src_sys, src_comp=src_comp)
-                    print(f"[mqtt_adapter] encoded MISSION_ITEM_INT -> {len(out_bytes)} bytes")
-                    try:
-                        ack_topic = f"command/{tgt_sys}/{tgt_comp}/ack"
-                        ack_payload = json.dumps({"status": "encoded", "msg": "MISSION_ITEM_INT", "bytes": len(out_bytes), "seq": seq})
-                        self.client.publish(ack_topic, ack_payload)
-                    except Exception:
-                        pass
-                else:
-                    # fallback: encode as JSON bytes and let transports handle it
-                    out_bytes = json.dumps({"topic": topic, "payload": data}).encode("utf-8")
+                out_bytes, ack_sys, ack_comp, ack_payload = self._encode_uplink(topic, data, target_sys, target_comp)
+                if ack_payload:
+                    self._publish_command_ack(ack_sys, ack_comp, ack_payload)
             except Exception as e:
                 print(f"[mqtt_adapter] failed to encode MAVLink message: {e}; falling back to JSON payload")
                 out_bytes = json.dumps({"topic": topic, "payload": data}).encode("utf-8")
@@ -634,42 +780,34 @@ class MQTTAdapter:
 
         # handle mission upload responses
         if topic.startswith("device/") and "MISSION_REQUEST" in topic:
-            parts = topic.split("/")
-            if len(parts) >= 4:
+            sysid, compid = self._parse_device_topic_ids(topic)
+            if sysid is not None and compid is not None:
                 try:
-                    sysid = int(parts[1])
-                    compid = int(parts[2])
                     payload = json.loads(msg.payload.decode("utf-8"))
                     seq = payload.get("fields", {}).get("seq", 0)
                     self.mission_manager.handle_mission_request(sysid, compid, seq)
                 except Exception:
                     pass
         elif topic.startswith("device/") and "MISSION_ACK" in topic:
-            parts = topic.split("/")
-            if len(parts) >= 4:
+            sysid, compid = self._parse_device_topic_ids(topic)
+            if sysid is not None and compid is not None:
                 try:
-                    sysid = int(parts[1])
-                    compid = int(parts[2])
                     self.mission_manager.handle_mission_ack(sysid, compid)
                 except Exception:
                     pass
         elif topic.startswith("device/") and "MISSION_COUNT" in topic:
-            parts = topic.split("/")
-            if len(parts) >= 4:
+            sysid, compid = self._parse_device_topic_ids(topic)
+            if sysid is not None and compid is not None:
                 try:
-                    sysid = int(parts[1])
-                    compid = int(parts[2])
                     payload = json.loads(msg.payload.decode("utf-8"))
                     count = payload.get("fields", {}).get("count", 0)
                     self.mission_manager.handle_mission_count(sysid, compid, count)
                 except Exception:
                     pass
         elif topic.startswith("device/") and "MISSION_ITEM_INT" in topic:
-            parts = topic.split("/")
-            if len(parts) >= 4:
+            sysid, compid = self._parse_device_topic_ids(topic)
+            if sysid is not None and compid is not None:
                 try:
-                    sysid = int(parts[1])
-                    compid = int(parts[2])
                     payload = json.loads(msg.payload.decode("utf-8"))
                     fields = payload.get("fields", {})
                     seq = fields.get("seq", 0)
@@ -726,9 +864,8 @@ class MQTTAdapter:
                             
                             # Process any complete messages
                             for msg_obj in messages:
-                                    # basic sanity checks: ensure parser returned a useful message
+                                # basic sanity checks: ensure parser returned a useful message
                                 msg_type_probe = getattr(msg_obj, 'get_type', lambda: None)()
-                                # try to obtain a fields dict; many pymavlink message objects expose to_dict()
                                 try:
                                     probe_fields = msg_obj.to_dict() if hasattr(msg_obj, 'to_dict') else {k: v for k, v in vars(msg_obj).items() if not k.startswith('_')}
                                 except Exception:
@@ -744,83 +881,27 @@ class MQTTAdapter:
                                             pass
                                         self._warned_parser_empty = True
                                     continue
-                                else:
-                                    decoded_any = True
-                            # obtain src sys/comp from the message header when available
-                            try:
-                                src_sys = int(getattr(msg_obj, 'srcSystem', None) or getattr(msg_obj, 'get_srcSystem', lambda: None)() or 0)
-                            except Exception:
-                                src_sys = None
-                            try:
-                                src_comp = int(getattr(msg_obj, 'srcComponent', None) or getattr(msg_obj, 'get_srcComponent', lambda: None)() or 0)
-                            except Exception:
-                                src_comp = None
-
-                            # fallback: try to read header bytes for v1/v2
-                            if src_sys is None or src_comp is None:
-                                if len(data) >= 7 and mavlink_encoder.is_mavlink2_packet(data):
-                                    src_sys = src_sys or data[5]
-                                    src_comp = src_comp or data[6]
-                                elif len(data) >= 6 and data[0] == 0xFE:
-                                    src_sys = src_sys or data[3]
-                                    src_comp = src_comp or data[4]
-
-                            # convert message fields to a plain dict
-                            try:
-                                if hasattr(msg_obj, 'to_dict'):
-                                    fields = msg_obj.to_dict()
-                                else:
-                                    # generic fallback: take public attrs
-                                    fields = {k: v for k, v in vars(msg_obj).items() if not k.startswith('_')}
-                            except Exception:
-                                fields = {}
-
-                            msg_type = getattr(msg_obj, 'get_type', lambda: None)()
-                            if msg_type is None:
-                                msg_type = getattr(msg_obj, 'name', 'UNKNOWN')
-
-                            # determine destination system/component if present in payload fields
-                            dest_sys = int(fields.get('target_system', 0) or fields.get('target_sys', 0) or 0)
-                            dest_comp = int(fields.get('target_component', 0) or fields.get('target_comp', 0) or 0)
-
-                            # publish full JSON document for this msg using labeled topic segments
-                            sus = src_sys or 0
-                            suc = src_comp or 0
-                            dus = dest_sys or 0
-                            duc = dest_comp or 0
-                            device_topic_base = f"device/sysid_{sus}/compid_{suc}/{msg_type}"
-                            device_publishes = 0
-                            source_publishes = 0
-                            try:
-                                self.client.publish(device_topic_base, json.dumps({"fields": fields, "src_addr": addr, "port": name}))
-                                device_publishes += 1
-                            except Exception:
-                                pass
-
-                            # publish each field individually as device/sysid_<n>/compid_<m>/<MSG>/<field>
-                            if self._publish_fields:
-                                for k, v in (fields or {}).items():
-                                    try:
-                                        self.client.publish(f"{device_topic_base}/{k}", json.dumps(v))
-                                        device_publishes += 1
-                                    except Exception:
-                                        pass
-
-                            # publish the source-oriented topic using labeled segments
-                            source_topic = f"sources/source_sysid_{sus}/source_compid_{suc}/dest_sysid_{dus}/dest_compid_{duc}/{msg_type}/{name}"
-                            try:
-                                self.client.publish(source_topic, json.dumps({"fields": fields, "src_addr": addr}))
-                                source_publishes += 1
-                            except Exception:
-                                pass
-
-                            # debug: optionally log per-packet publish counts
-                            if self._debug_publish_counts:
+                                decoded_any = True
                                 try:
-                                    print(f"[mqtt_adapter] packet from {addr} (port={name}) msg={msg_type} -> device_publishes={device_publishes} source_publishes={source_publishes}")
+                                    src_sys = int(getattr(msg_obj, 'srcSystem', None) or getattr(msg_obj, 'get_srcSystem', lambda: None)() or 0)
                                 except Exception:
-                                    pass
-                            self._total_publishes += device_publishes + source_publishes
+                                    src_sys = None
+                                try:
+                                    src_comp = int(getattr(msg_obj, 'srcComponent', None) or getattr(msg_obj, 'get_srcComponent', lambda: None)() or 0)
+                                except Exception:
+                                    src_comp = None
+
+                                if src_sys is None or src_comp is None:
+                                    if len(data) >= 7 and mavlink_encoder.is_mavlink2_packet(data):
+                                        src_sys = src_sys or data[5]
+                                        src_comp = src_comp or data[6]
+                                    elif len(data) >= 6 and data[0] == 0xFE:
+                                        src_sys = src_sys or data[3]
+                                        src_comp = src_comp or data[4]
+
+                                fields = probe_fields
+                                msg_type = msg_type_probe or getattr(msg_obj, 'name', 'UNKNOWN')
+                                self._publish_decoded_message(name, addr, msg_type, fields, src_sys, src_comp)
 
                     # if parser not available or decode failed, fall back to old RAW topics
                 except Exception:
@@ -890,7 +971,7 @@ class MQTTAdapter:
                                                     device_publishes += 1
                                                 except Exception:
                                                     pass
-                                        source_topic = f"sources/source_sysid_{sus}/source_compid_{suc}/0/0/HEARTBEAT/{name}"
+                                        source_topic = self._source_topic(sus, suc, 0, 0, "HEARTBEAT", name)
                                         try:
                                             self.client.publish(source_topic, json.dumps({"fields": fields, "src_addr": addr}))
                                             source_publishes += 1
@@ -907,7 +988,7 @@ class MQTTAdapter:
                                         manual_decoded = False
 
                         if not manual_decoded:
-                            topic_sources = f"sources/source_sysid_{src_sys or 0}/source_compid_{src_comp or 0}/0/0/RAW/{name}"
+                            topic_sources = self._source_topic(src_sys or 0, src_comp or 0, 0, 0, "RAW", name)
                             topic_device = f"device/sysid_{src_sys or 0}/compid_{src_comp or 0}/RAW"
                             payload = data.hex()
                             try:
@@ -918,7 +999,7 @@ class MQTTAdapter:
                     except Exception:
                         # on any unexpected error, ensure we still publish raw
                         try:
-                            topic_sources = f"sources/source_sysid_{src_sys or 0}/source_compid_{src_comp or 0}/0/0/RAW/{name}"
+                            topic_sources = self._source_topic(src_sys or 0, src_comp or 0, 0, 0, "RAW", name)
                             topic_device = f"device/sysid_{src_sys or 0}/compid_{src_comp or 0}/RAW"
                             payload = data.hex()
                             self.client.publish(topic_sources, payload)
@@ -950,50 +1031,19 @@ class MQTTAdapter:
                 # snapshot keys to avoid mutation during iteration
                 keys = list(self.pending_commands.keys())
                 for target_sys in keys:
-                    # find a port that has seen this sysid
-                    dest_port = None
-                    for p, seen in getattr(self.router, "observed_sysids", {}).items():
-                        if target_sys in seen:
-                            dest_port = p
-                            break
+                    dest_port, dest_addr = self._resolve_command_route(target_sys)
                     if dest_port is None:
                         continue
-                    dest_addr = self._resolve_dest_addr(dest_port)
                     if dest_addr is None:
                         continue
                     items = list(self.pending_commands.get(target_sys, []))
                     for topic, data in items:
                         try:
-                            # reuse the adapter encoding logic by constructing a fake msg
-                            # but we already stored raw data dict; re-encode as needed
-                            if isinstance(data, dict) and (data.get("msg") == "COMMAND_LONG" or data.get("type") == "COMMAND_LONG"):
-                                tgt_sys = int(data.get("target_sys", target_sys))
-                                tgt_comp = int(data.get("target_comp", 1))
-                                cmd = int(data.get("command"))
-                                params = data.get("params", [])
-                                out_bytes = mavlink_encoder.encode_command_long(tgt_sys, tgt_comp, cmd, params)
-                            elif isinstance(data, dict) and (data.get("msg") == "MISSION_ITEM_INT" or data.get("type") == "MISSION_ITEM_INT"):
-                                tgt_sys = int(data.get("target_sys", target_sys))
-                                tgt_comp = int(data.get("target_comp", 1))
-                                seq = int(data.get("seq", 0))
-                                frame = int(data.get("frame", 0))
-                                cmd = int(data.get("command", 16))
-                                x = int(data.get("x", 0))
-                                y = int(data.get("y", 0))
-                                z = float(data.get("z", 0.0))
-                                params = data.get("params", [])
-                                out_bytes = mavlink_encoder.encode_mission_item_int(tgt_sys, tgt_comp, seq, frame, cmd, params=params, x=x, y=y, z=z)
-                            else:
-                                out_bytes = json.dumps({"topic": topic, "payload": data}).encode("utf-8")
+                            out_bytes, ack_sys, ack_comp, _ = self._encode_uplink(topic, data, target_sys, int(data.get("target_comp", 1) if isinstance(data, dict) else 1))
 
                             self.ports[dest_port]["out_q"].put((dest_addr, out_bytes))
                             # publish ACK
-                            try:
-                                ack_topic = f"command/{target_sys}/{data.get('target_comp', 0)}/ack"
-                                ack_payload = json.dumps({"status": "delivered", "topic": topic})
-                                self.client.publish(ack_topic, ack_payload)
-                            except Exception:
-                                pass
+                            self._publish_command_ack(ack_sys, ack_comp, {"status": "delivered", "topic": topic})
                             try:
                                 print(f"[mqtt_adapter][_pending_loop] re-injected pending topic={topic} to port={dest_port} dest={dest_addr} len={len(out_bytes)}")
                             except Exception:

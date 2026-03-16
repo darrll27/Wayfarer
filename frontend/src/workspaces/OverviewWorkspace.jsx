@@ -1,6 +1,6 @@
 import React from 'react'
 import Panel from '../components/Panel'
-import {evaluateBirdStatus} from '../hooks/useBirds'
+import {evaluateBirdStatus, splitBirdGroups} from '../hooks/useBirds'
 
 function formatGpsFix(bird) {
   const hasPosition = bird && bird.lat !== null && bird.lon !== null
@@ -29,9 +29,9 @@ function getBatteryPercent(value) {
   return Math.max(0, Math.min(100, Math.round(n)))
 }
 
-export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypointsDemo}) {
+export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypointsDemo, systemRange}) {
   const now = Date.now()
-  const birds = birdList || []
+  const {birds, nonBirds} = splitBirdGroups(birdList || [], systemRange)
   const live = birds.filter((b) => evaluateBirdStatus(b, now).isLive)
   const dead = birds.length - live.length
   const ready = birds.filter((b) => evaluateBirdStatus(b, now).isReady)
@@ -54,6 +54,7 @@ export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypoint
           <div className="stat"><div className="stat-label">Dead</div><div className="stat-value">{dead}</div></div>
           <div className="stat"><div className="stat-label">Ready</div><div className="stat-value">{ready.length}</div></div>
           <div className="stat"><div className="stat-label">Not Ready</div><div className="stat-value">{notReady}</div></div>
+          <div className="stat"><div className="stat-label">Ground Systems</div><div className="stat-value">{nonBirds.length}</div></div>
         </div>
         <div className="matrix-legend">
           <span className="legend-item"><span className="legend-dot ready" />Ready (green pulse)</span>
@@ -87,37 +88,65 @@ export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypoint
           {birds.length === 0 ? (
             <div className="empty">No birds observed yet.</div>
           ) : (
-            birds.map((bird) => {
-              const {isLive, isReady} = evaluateBirdStatus(bird, now)
-              const batteryPct = getBatteryPercent(bird.metrics && bird.metrics.battery)
-              return (
-                <div key={bird.sysid} className="summary-bird-card">
-                  <div className="summary-bird-head">
-                    <div className="bird-title">Bird {bird.sysid}</div>
-                    <span className={`status-dot ${isLive ? 'live pulse' : 'dead'}`} title={isLive ? 'live telemetry' : 'dead'} />
-                  </div>
-                  <div className="summary-bird-row">
-                    <span className={`ready-pill ${isReady ? 'ready' : 'not-ready'}`}>{isReady ? 'READY' : 'NOT READY'}</span>
-                    <span className="bird-meta">GPS {bird.gpsCount ?? 'n/a'}</span>
-                  </div>
-                  <div className="bird-meta">
-                    GPS Fix: {formatGpsFix(bird)}
-                  </div>
-                  <div className="bird-meta">
-                    HDOP {formatDop(bird.metrics && bird.metrics.eph)} · VDOP {formatDop(bird.metrics && bird.metrics.epv)}
-                  </div>
-                  <div className="summary-bird-row battery-row">
-                    <span className="bird-meta">Battery</span>
-                    <span className="battery-inline">
-                      <span className="battery-meter" aria-label="battery level">
-                        <span className="battery-fill" style={{width: `${batteryPct ?? 0}%`}} />
-                      </span>
-                      <span className="bird-meta battery-value">{batteryPct !== null ? `${batteryPct}%` : 'n/a'}</span>
-                    </span>
-                  </div>
+            <>
+              {birds.length > 0 && (
+                <div className="group-separator group-separator-air summary-separator">
+                  <span>Air</span>
                 </div>
-              )
-            })
+              )}
+              {birds.map((bird) => {
+                const {isLive, isReady} = evaluateBirdStatus(bird, now)
+                const batteryPct = getBatteryPercent(bird.metrics && bird.metrics.battery)
+                return (
+                  <div key={bird.sysid} className="summary-bird-card summary-air-card">
+                    <div className="summary-bird-head">
+                      <div className="bird-title">Bird {bird.sysid}</div>
+                      <span className={`status-dot ${isLive ? 'live pulse' : 'dead'}`} title={isLive ? 'live telemetry' : 'dead'} />
+                    </div>
+                    <div className="summary-bird-row">
+                      <span className={`ready-pill ${isReady ? 'ready' : 'not-ready'}`}>{isReady ? 'READY' : 'NOT READY'}</span>
+                      <span className="bird-meta">GPS {bird.gpsCount ?? 'n/a'}</span>
+                    </div>
+                    <div className="bird-meta">
+                      GPS Fix: {formatGpsFix(bird)}
+                    </div>
+                    <div className="bird-meta">
+                      HDOP {formatDop(bird.metrics && bird.metrics.eph)} · VDOP {formatDop(bird.metrics && bird.metrics.epv)}
+                    </div>
+                    <div className="summary-bird-row battery-row">
+                      <span className="bird-meta">Battery</span>
+                      <span className="battery-inline">
+                        <span className="battery-meter" aria-label="battery level">
+                          <span className="battery-fill" style={{width: `${batteryPct ?? 0}%`}} />
+                        </span>
+                        <span className="bird-meta battery-value">{batteryPct !== null ? `${batteryPct}%` : 'n/a'}</span>
+                      </span>
+                    </div>
+                  </div>
+                )
+              })}
+              {nonBirds.length > 0 && (
+                <>
+                  <div className="group-separator group-separator-ground summary-separator">
+                    <span>Ground</span>
+                  </div>
+                  {nonBirds.map((entry) => {
+                    const {isLive} = evaluateBirdStatus(entry, now)
+                    return (
+                      <div key={entry.sysid} className="summary-bird-card summary-nonbird-card">
+                        <div className="summary-bird-head">
+                          <div className="bird-title">GCS {entry.sysid}</div>
+                          <span className={`status-dot ${isLive ? 'live pulse' : 'dead'}`} />
+                        </div>
+                        <div className="bird-meta">Component {entry.compid ?? 'n/a'}</div>
+                        <div className="bird-meta">Last seen {entry.lastSeen ? new Date(entry.lastSeen).toLocaleTimeString() : 'never'}</div>
+                        <div className="bird-meta">Mode {entry.metrics && entry.metrics.mode ? entry.metrics.mode : 'unknown'}</div>
+                      </div>
+                    )
+                  })}
+                </>
+              )}
+            </>
           )}
         </div>
       </Panel>

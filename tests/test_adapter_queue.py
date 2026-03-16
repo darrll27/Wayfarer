@@ -1,7 +1,38 @@
 import json
 import queue
+import sys
 import threading
 import time
+import types
+
+
+def _install_paho_stub():
+    if "paho.mqtt.client" in sys.modules:
+        return
+    paho = types.ModuleType("paho")
+    mqtt_pkg = types.ModuleType("paho.mqtt")
+    client_mod = types.ModuleType("paho.mqtt.client")
+
+    class FakePahoClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def username_pw_set(self, *args, **kwargs):
+            pass
+
+        def publish(self, *args, **kwargs):
+            pass
+
+        def subscribe(self, *args, **kwargs):
+            pass
+
+    client_mod.Client = FakePahoClient
+    sys.modules["paho"] = paho
+    sys.modules["paho.mqtt"] = mqtt_pkg
+    sys.modules["paho.mqtt.client"] = client_mod
+
+
+_install_paho_stub()
 
 from backend.mav_router.mqtt_adapter import MQTTAdapter
 
@@ -24,7 +55,7 @@ class DummyMsg:
 
 
 def make_adapter_no_start():
-    cfg = {"mqtt": {"host": "localhost", "port": 1883}}
+    cfg = {"mqtt": {"host": "localhost", "port": 1883}, "command_out_port": "udp1"}
     ports = {"udp1": {"out_q": queue.Queue()}}
 
     class DummyRouter:

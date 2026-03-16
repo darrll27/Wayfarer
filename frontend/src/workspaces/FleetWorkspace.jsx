@@ -1,7 +1,25 @@
 import React from 'react'
 import Panel from '../components/Panel'
+import {splitBirdGroups} from '../hooks/useBirds'
 
-export default function FleetWorkspace({birdList, telemetry}) {
+export default function FleetWorkspace({birdList, telemetry, systemRange}) {
+  const {birds, nonBirds} = splitBirdGroups(birdList, systemRange)
+
+  function renderLocation(entry, labelPrefix = 'Bird') {
+    return (
+      <div key={entry.sysid} className="location-card">
+        <div className="location-title">{labelPrefix} {entry.sysid}</div>
+        <div className="location-meta">Last seen {entry.lastSeen ? new Date(entry.lastSeen).toLocaleTimeString() : 'never'}</div>
+        <div className="location-coords">
+          {entry.lat !== null && entry.lon !== null ? `${entry.lat.toFixed(5)}, ${entry.lon.toFixed(5)}` : 'No GPS fix'}
+        </div>
+        <div className="location-meta">
+          {entry.gpsCount !== null ? `GPS: ${entry.gpsCount} sats` : 'GPS: unknown'}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="grid">
       <Panel title="Fleet Locations">
@@ -9,18 +27,22 @@ export default function FleetWorkspace({birdList, telemetry}) {
           {birdList.length === 0 ? (
             <div className="empty">No location updates yet.</div>
           ) : (
-            birdList.map(bird => (
-              <div key={bird.sysid} className="location-card">
-                <div className="location-title">Bird {bird.sysid}</div>
-                <div className="location-meta">Last seen {bird.lastSeen ? new Date(bird.lastSeen).toLocaleTimeString() : 'never'}</div>
-                <div className="location-coords">
-                  {bird.lat !== null && bird.lon !== null ? `${bird.lat.toFixed(5)}, ${bird.lon.toFixed(5)}` : 'No GPS fix'}
+            <>
+              {birds.length > 0 && (
+                <div className="group-separator group-separator-air location-separator">
+                  <span>Air</span>
                 </div>
-                <div className="location-meta">
-                  {bird.gpsCount !== null ? `GPS: ${bird.gpsCount} sats` : 'GPS: unknown'}
-                </div>
-              </div>
-            ))
+              )}
+              {birds.map((bird) => renderLocation(bird, 'Bird'))}
+              {nonBirds.length > 0 && (
+                <>
+                  <div className="group-separator group-separator-ground location-separator">
+                    <span>Ground</span>
+                  </div>
+                  {nonBirds.map((entry) => renderLocation(entry, 'GCS'))}
+                </>
+              )}
+            </>
           )}
         </div>
       </Panel>

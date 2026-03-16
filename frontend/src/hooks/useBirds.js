@@ -2,6 +2,22 @@ import {useEffect, useMemo, useRef} from 'react'
 
 const HEARTBEAT_LIVE_MS = 10000
 
+export function isNonBirdSysid(sysid, range = {start: 250, end: 255}) {
+  const value = Number(sysid)
+  const start = Number(range && range.start)
+  const end = Number(range && range.end)
+  if (!Number.isFinite(value) || !Number.isFinite(start) || !Number.isFinite(end)) return false
+  return value >= Math.min(start, end) && value <= Math.max(start, end)
+}
+
+export function splitBirdGroups(records, range = {start: 250, end: 255}) {
+  const items = Array.isArray(records) ? records : []
+  return {
+    birds: items.filter((item) => !isNonBirdSysid(item && item.sysid, range)),
+    nonBirds: items.filter((item) => isNonBirdSysid(item && item.sysid, range))
+  }
+}
+
 export function evaluateBirdStatus(bird, now = Date.now()) {
   const isLive = now - (bird.lastSeen || 0) <= HEARTBEAT_LIVE_MS
   const systemStatus = Number(bird.metrics && bird.metrics.systemStatus)
@@ -113,7 +129,7 @@ export function parseDeviceTopic(topic) {
   return null
 }
 
-export function useBirds(telemetry, birdFilter, selectedBird, dataLossGraceMs) {
+export function useBirds(telemetry, birdFilter, selectedBird, dataLossGraceMs, systemRange = {start: 250, end: 255}) {
   const modeCacheRef = useRef({})
   const heartbeatCacheRef = useRef({})
   const retainedBirdsRef = useRef({})
@@ -394,13 +410,16 @@ export function useBirds(telemetry, birdFilter, selectedBird, dataLossGraceMs) {
   const fleetStats = useMemo(() => {
     const now = Date.now()
     const all = Object.values(birdRecords)
-    const active = all.filter(b => now - (b.lastSeen || 0) < 10000)
+    const birdsOnly = all.filter((b) => !isNonBirdSysid(b.sysid, systemRange))
+    const nonBirds = all.filter((b) => isNonBirdSysid(b.sysid, systemRange))
+    const active = birdsOnly.filter(b => now - (b.lastSeen || 0) < 10000)
     return {
-      total: all.length,
+      total: birdsOnly.length,
       active: active.length,
-      stale: all.length - active.length
+      stale: birdsOnly.length - active.length,
+      nonBirds: nonBirds.length
     }
-  }, [birdRecords])
+  }, [birdRecords, systemRange])
 
   return {
     birdRecords,

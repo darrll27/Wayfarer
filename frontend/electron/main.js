@@ -1,4 +1,6 @@
 const path = require('path');
+const fs = require('fs');
+const net = require('net');
 const {app, BrowserWindow} = require('electron');
 const isDev = process.env.NODE_ENV !== 'production';
 
@@ -15,6 +17,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: false,
     },
   });
 
@@ -26,17 +29,46 @@ function createWindow() {
   }
 }
 
-function startAedes(wsPort = 1884) {
+function readBrokerConfig() {
   try {
+    const cfgPath = path.resolve(__dirname, '..', '..', 'config', 'broker.json');
+    return JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+  } catch (e) {
+    console.warn('[main] Failed to read broker.json, using defaults:', e.message);
+    return {
+      mode: 'internal',
+      host: 'localhost',
+      tcp_port: 1883,
+      ws_port: 1884,
+    };
+  }
+}
+
+function startAedes() {
+  try {
+    const broker = readBrokerConfig();
+    if ((broker.mode || 'internal') !== 'internal') {
+      console.log(`[main] Broker mode is external; not starting local Aedes. Expected broker at mqtt://${broker.host}:${broker.tcp_port} and ws://${broker.host}:${broker.ws_port}`);
+      return;
+    }
     const aedes = require('aedes')();
     const http = require('http');
     const websocket = require('websocket-stream');
-    const server = http.createServer();
-    websocket.createServer({server: server}, aedes.handle);
-    server.listen(wsPort, () => {
-      console.log(`[main] Aedes websocket broker listening on ws://localhost:${wsPort}`);
+    const host = broker.host || 'localhost';
+    const tcpPort = Number(broker.tcp_port || 1883);
+    const wsPort = Number(broker.ws_port || 1884);
+
+    const tcpServer = net.createServer(aedes.handle);
+    tcpServer.listen(tcpPort, host, () => {
+      console.log(`[main] Aedes TCP broker listening on mqtt://${host}:${tcpPort}`);
     });
-    aedesServer = {aedes, server};
+
+    const wsServer = http.createServer();
+    websocket.createServer({server: wsServer}, aedes.handle);
+    wsServer.listen(wsPort, host, () => {
+      console.log(`[main] Aedes websocket broker listening on ws://${host}:${wsPort}`);
+    });
+    aedesServer = {aedes, tcpServer, wsServer};
   } catch (e) {
     console.error('[main] Failed to start Aedes broker:', e);
   }
@@ -77,8 +109,8 @@ function startBackendApi() {
 }
 
 app.whenReady().then(() => {
-  // Start local Aedes broker for the renderer to connect via MQTT over WS
-  startAedes(1884);
+  // Start local Aedes broker for both backend TCP clients and renderer WS clients.
+  startAedes();
 
   // Optionally start the Python backend so the packaged app contains it.
   // Use a separate process so the router remains decoupled.
@@ -106,6 +138,12 @@ app.on('before-quit', () => {
     if (backendApiProc) backendApiProc.kill();
   } catch (e) {}
   try {
-    if (aedesServer && aedesServer.server) aedesServer.server.close();
+    if (aedesServer && aedesServer.tcpServer) aedesServer.tcpServer.close();
+  } catch (e) {}
+  try {
+    if (aedesServer && aedesServer.wsServer) aedesServer.wsServer.close();
+  } catch (e) {}
+  try {
+    if (aedesServer && aedesServer.aedes) aedesServer.aedes.close();
   } catch (e) {}
 });

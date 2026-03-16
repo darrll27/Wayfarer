@@ -10,7 +10,7 @@ import MissionsWorkspace from './workspaces/MissionsWorkspace'
 import LogsWorkspace from './workspaces/LogsWorkspace'
 import SettingsWorkspace from './workspaces/SettingsWorkspace'
 import useTelemetry from './hooks/useTelemetry'
-import {parseDeviceTopic, useBirds} from './hooks/useBirds'
+import {isNonBirdSysid, parseDeviceTopic, useBirds} from './hooks/useBirds'
 
 const isElectron = typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Electron') || (typeof window !== 'undefined' && window.process && window.process.versions && window.process.versions.electron)
 
@@ -23,6 +23,11 @@ const WORKSPACES = [
   {id: 'logs', label: 'Logs'},
   {id: 'settings', label: 'Settings'}
 ]
+
+const DEFAULT_MAP_CENTER = [37.4680, -122.0870]
+const DEFAULT_MISSIONS_ZOOM = 16
+const DEFAULT_QGC_ZOOM = 16
+const FOCUS_BIRDS_MAX_ZOOM = 19
 
 export default function App() {
   const [toasts, setToasts] = useState([])
@@ -47,6 +52,15 @@ export default function App() {
     const stored = Number(window.localStorage.getItem('telemetryLossGraceMs'))
     if (Number.isFinite(stored) && stored >= 1000) return stored
     return 1000
+  })
+  const [systemRange, setSystemRange] = useState(() => {
+    if (typeof window === 'undefined') return {start: 250, end: 255}
+    const start = Number(window.localStorage.getItem('groundSysidRangeStart'))
+    const end = Number(window.localStorage.getItem('groundSysidRangeEnd'))
+    return {
+      start: Number.isFinite(start) ? start : 250,
+      end: Number.isFinite(end) ? end : 255
+    }
   })
 
   const mapRef = useRef(null)
@@ -73,6 +87,7 @@ export default function App() {
     brokerMissing,
     brokerError,
     downloadedMissions,
+    missionDownloadStatusBySysid,
     clientRef,
     retryFetchBroker
   } = useTelemetry(addToast)
@@ -84,7 +99,7 @@ export default function App() {
     selectedBirdTelemetry,
     selectedBirdMode,
     fleetStats
-  } = useBirds(telemetry, birdFilter, selectedBird, dataLossGraceMs)
+  } = useBirds(telemetry, birdFilter, selectedBird, dataLossGraceMs, systemRange)
 
   const backendStatusGraceMs = 7000
   const backendIsOnline = backendHeartbeatTs > 0 && Date.now() - backendHeartbeatTs <= backendStatusGraceMs
@@ -96,6 +111,12 @@ export default function App() {
     if (typeof window === 'undefined') return
     window.localStorage.setItem('telemetryLossGraceMs', String(dataLossGraceMs))
   }, [dataLossGraceMs])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem('groundSysidRangeStart', String(systemRange.start))
+    window.localStorage.setItem('groundSysidRangeEnd', String(systemRange.end))
+  }, [systemRange])
 
   useEffect(() => {
     if (!selectedBird && birdList.length > 0) {
@@ -267,9 +288,16 @@ export default function App() {
       const heading = Number(bird.metrics && bird.metrics.heading)
       const rotation = Number.isFinite(heading) ? heading : 0
       const birdLabel = String(bird.sysid)
+      const isNonBird = isNonBirdSysid(bird.sysid, systemRange)
       const isSelected = highlightSelected && String(selectedBirdRecord.sysid) === String(bird.sysid)
-      const iconStateClass = highlightSelected ? (isSelected ? 'selected' : 'muted') : ''
-      const idStateClass = highlightSelected ? (isSelected ? 'selected' : 'muted') : ''
+      const iconStateClass = [
+        highlightSelected ? (isSelected ? 'selected' : 'muted') : '',
+        isNonBird ? 'nonbird' : ''
+      ].filter(Boolean).join(' ')
+      const idStateClass = [
+        highlightSelected ? (isSelected ? 'selected' : 'muted') : '',
+        isNonBird ? 'nonbird' : ''
+      ].filter(Boolean).join(' ')
       const icon = window.L.divIcon({
         className: 'qgc-bird-marker',
         html: `<div class="qgc-bird-wrap"><div class="qgc-bird-icon ${iconStateClass}" style="transform: rotate(${rotation}deg)">➤</div><div class="qgc-bird-id ${idStateClass}">${birdLabel}</div></div>`,
@@ -278,9 +306,9 @@ export default function App() {
       })
       const marker = window.L.marker([bird.lat, bird.lon], {
         icon,
-        zIndexOffset: isSelected ? 1000 : 0
+        zIndexOffset: isSelected ? 1000 : (isNonBird ? -50 : 0)
       }).addTo(qgcMapRef.current)
-      marker.bindTooltip(`Bird ${bird.sysid}`, {permanent: false})
+      marker.bindTooltip(`${isNonBird ? 'Ground' : 'Air'} ${bird.sysid}`, {permanent: false})
       qgcMapLayersRef.current.push(marker)
     })
   }
@@ -293,7 +321,7 @@ export default function App() {
       .map(bird => [bird.lat, bird.lon])
     if (points.length === 0) return
     const bounds = window.L.latLngBounds(points)
-    qgcMapRef.current.fitBounds(bounds.pad(0.3))
+    qgcMapRef.current.fitBounds(bounds.pad(0.3), {maxZoom: FOCUS_BIRDS_MAX_ZOOM})
   }, [mapScope, selectedBirdRecord, birdList])
 
   const setQgcScopeAndFocus = useCallback((scope) => {
@@ -355,7 +383,7 @@ export default function App() {
         setTimeout(setup, 200)
         return
       }
-      mapRef.current = window.L.map('map', {zoomControl: true}).setView([37.4680, -122.0870], 15)
+      mapRef.current = window.L.map('map', {zoomControl: true}).setView(DEFAULT_MAP_CENTER, DEFAULT_MISSIONS_ZOOM)
       window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors'
       }).addTo(mapRef.current)
@@ -399,7 +427,7 @@ export default function App() {
         maxZoom: 28,
         zoomSnap: 0.1,
         zoomDelta: 0.1
-      }).setView([37.4680, -122.0870], 14)
+      }).setView(DEFAULT_MAP_CENTER, DEFAULT_QGC_ZOOM)
       updateQgcBaseLayer()
       window.L.control.scale({position: 'bottomleft', metric: true, imperial: false}).addTo(qgcMapRef.current)
       updateQgcMapMarkers()
@@ -488,8 +516,16 @@ export default function App() {
   async function downloadMissionFromDrone(payload) {
     try {
       const r = await fetch('/api/waypoints/download', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)})
-      const j = await r.json()
-      addToast({title: 'Download initiated', body: JSON.stringify(j)})
+      const j = await r.json().catch(() => ({}))
+      if (!r.ok) {
+        addToast({title: 'Download request failed', body: j.detail ? String(j.detail) : `HTTP ${r.status}`})
+        return
+      }
+      if (!j.ok) {
+        addToast({title: 'Download request not sent', body: `sysid ${payload.sysid} compid ${payload.compid || 1}`})
+        return
+      }
+      addToast({title: 'Download requested', body: `${j.topic || `command/${payload.sysid}/${payload.compid || 1}/download_mission`}`})
     } catch (e) {
       console.error('downloadMissionFromDrone failed', e)
       addToast({title: 'Download failed', body: String(e)})
@@ -521,9 +557,7 @@ export default function App() {
     const payload = {
       command: 'SET_MODE',
       mode: selectedMode,
-      params: [],
-      src_sysid: 250,
-      src_compid: 1
+      params: []
     }
     clientRef.current.publish(`command/${sysid}/${compid}/details`, JSON.stringify(payload))
     addToast({title: 'Mode sent', body: `Bird ${sysid} -> ${selectedMode}`})
@@ -535,9 +569,7 @@ export default function App() {
     const compid = selectedBirdRecord ? Number(selectedBirdRecord.compid) : 1
     const payload = {
       command: 'MAV_CMD_COMPONENT_ARM_DISARM',
-      params: [armFlag ? 1 : 0, 0, 0, 0, 0, 0, 0],
-      src_sysid: 250,
-      src_compid: 1
+      params: [armFlag ? 1 : 0, 0, 0, 0, 0, 0, 0]
     }
     clientRef.current.publish(`command/${sysid}/${compid}/details`, JSON.stringify(payload))
     addToast({title: armFlag ? 'Arm command sent' : 'Disarm command sent', body: `Bird ${sysid}`})
@@ -625,11 +657,12 @@ export default function App() {
               telemetry={telemetry}
               birdList={birdList}
               sendLoadWaypointsDemo={sendLoadWaypointsDemo}
+              systemRange={systemRange}
             />
           )}
 
           {workspace === 'fleet' && (
-            <FleetWorkspace birdList={birdList} telemetry={telemetry} />
+            <FleetWorkspace birdList={birdList} telemetry={telemetry} systemRange={systemRange} />
           )}
 
           {workspace === 'bird' && (
@@ -683,6 +716,9 @@ export default function App() {
               setDownloadCompid={setDownloadCompid}
               downloadMissionFromDrone={downloadMissionFromDrone}
               downloadFromAllDrones={downloadFromAllDrones}
+              missionDownloadStatusBySysid={missionDownloadStatusBySysid}
+              downloadedMissions={downloadedMissions}
+              selectedBird={selectedBird}
             />
           )}
 
@@ -700,6 +736,8 @@ export default function App() {
               uploadRawWaypoint={uploadRawWaypoint}
               dataLossGraceMs={dataLossGraceMs}
               setDataLossGraceMs={setDataLossGraceMs}
+              systemRange={systemRange}
+              setSystemRange={setSystemRange}
               brokerConfig={brokerConfig}
               saveBrokerConfig={saveBrokerConfig}
             />
@@ -724,6 +762,7 @@ export default function App() {
           selectedBird={selectedBird}
           setSelectedBird={setSelectedBird}
           fleetStats={fleetStats}
+          systemRange={systemRange}
         />
       </aside>
 

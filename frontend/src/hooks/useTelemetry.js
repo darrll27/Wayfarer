@@ -13,6 +13,7 @@ export default function useTelemetry(addToast) {
   const [brokerError, setBrokerError] = useState(null)
   const [brokerStatus, setBrokerStatus] = useState(null)
   const [downloadedMissions, setDownloadedMissions] = useState([])
+  const [missionDownloadStatusBySysid, setMissionDownloadStatusBySysid] = useState({})
 
   const clientRef = useRef(null)
   const brokerRef = useRef(null)
@@ -139,14 +140,72 @@ export default function useTelemetry(addToast) {
         if (topic.startsWith('Nomad/missions/downloaded/')) {
           try {
             const obj = JSON.parse(msg)
-            setDownloadedMissions((prev) => [obj].concat(prev).slice(0, 10))
-            if (addToastRef.current) {
-              addToastRef.current({title: 'Mission downloaded', body: `From sysid ${obj.sysid}: ${obj.count} waypoints`})
+            if (topic.endsWith('/status')) {
+              const sysidKey = String(obj.sysid ?? 'unknown')
+              setMissionDownloadStatusBySysid((prev) => ({
+                ...prev,
+                [sysidKey]: {
+                  sysid: obj.sysid ?? null,
+                  status: String(obj.status || 'unknown'),
+                  phase: obj.phase || null,
+                  seq: typeof obj.seq === 'number' ? obj.seq : null,
+                  ts: Date.now(),
+                  source: 'status-topic'
+                }
+              }))
+              if (addToastRef.current) {
+                addToastRef.current({title: 'Mission download status', body: `${obj.status || 'unknown'} (sysid ${obj.sysid ?? '?'})`})
+              }
+            } else {
+              setDownloadedMissions((prev) => [obj].concat(prev).slice(0, 10))
+              if (typeof obj.sysid !== 'undefined') {
+                const sysidKey = String(obj.sysid)
+                setMissionDownloadStatusBySysid((prev) => ({
+                  ...prev,
+                  [sysidKey]: {
+                    sysid: obj.sysid,
+                    status: 'completed',
+                    phase: null,
+                    seq: null,
+                    ts: Date.now(),
+                    source: 'mission-payload'
+                  }
+                }))
+              }
+              if (addToastRef.current) {
+                addToastRef.current({title: 'Mission downloaded', body: `From sysid ${obj.sysid}: ${obj.count} waypoints`})
+              }
             }
           } catch (e) {
             if (addToastRef.current) {
               addToastRef.current({title: 'Mission download', body: msg})
             }
+          }
+        }
+        if (topic.startsWith('command/') && topic.endsWith('/ack')) {
+          try {
+            const obj = JSON.parse(msg)
+            const status = String(obj.status || '')
+            if (status.includes('download') || status.includes('request')) {
+              const parts = topic.split('/')
+              const sysidKey = String(obj.sysid ?? parts[1] ?? 'unknown')
+              setMissionDownloadStatusBySysid((prev) => ({
+                ...prev,
+                [sysidKey]: {
+                  sysid: obj.sysid ?? (Number(parts[1]) || null),
+                  status,
+                  phase: null,
+                  seq: null,
+                  ts: Date.now(),
+                  source: 'command-ack'
+                }
+              }))
+              if (addToastRef.current) {
+                addToastRef.current({title: 'Download command ACK', body: status})
+              }
+            }
+          } catch (e) {
+            // ignore malformed ack payloads
           }
         }
         lastMessageTsRef.current = Date.now()
@@ -274,6 +333,7 @@ export default function useTelemetry(addToast) {
     brokerError,
     brokerStatus,
     downloadedMissions,
+    missionDownloadStatusBySysid,
     clientRef,
     retryFetchBroker,
     fetchBrokerConfig,
