@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "postinstall": "npm --prefix frontend install",
     "start": "npm run dev:desktop",
     "dev": "bash ./scripts/dev.sh",
     "dev:desktop": "bash ./scripts/dev.sh desktop",
