@@ -848,6 +848,120 @@ button.ghost {
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.packet-rate-table-wrap {
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(125, 211, 252, 0.12);
+  background: linear-gradient(180deg, rgba(8, 14, 24, 0.9), rgba(6, 10, 18, 0.96));
+}
+
+.packet-rate-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.packet-rate-table thead {
+  background: rgba(15, 23, 42, 0.96);
+}
+
+.packet-rate-table th,
+.packet-rate-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  white-space: nowrap;
+}
+
+.packet-rate-table th {
+  color: #a5f3fc;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+}
+
+.packet-rate-table tbody tr:hover {
+  background: rgba(14, 24, 40, 0.72);
+}
+
+.packet-type-cell {
+  color: #e2e8f0;
+  font-weight: 600;
+}
+
+.packet-rate-hot {
+  color: #7dd3fc;
+  font-weight: 700;
+}
+
+.packet-rate-cold {
+  color: #fda4af;
+  font-weight: 700;
+}
+
+.overview-map-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.overview-map-panel {
+  box-shadow: none;
+}
+
+.overview-map-panel .panel-body {
+  gap: 8px;
+}
+
+.overview-map-shell {
+  min-height: 320px;
+  height: min(48vh, 420px);
+}
+
+.overview-map-empty {
+  position: absolute;
+  inset: 12px 12px auto 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(6, 10, 18, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  color: var(--muted);
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+}
+
+.overview-map-caption {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.overview-bird-marker {
+  filter: none;
+}
+
+.overview-bird-icon {
+  box-shadow: none;
+  background: rgba(8, 14, 24, 0.96);
+}
+
+.overview-bird-icon.muted {
+  background: rgba(30, 41, 59, 0.72);
+  opacity: 0.7;
+}
+
+.overview-bird-id {
+  box-shadow: none;
+  background: rgba(8, 14, 24, 0.98);
+}
+
+.overview-bird-id.muted {
+  background: rgba(30, 41, 59, 0.9);
+  opacity: 0.76;
+}
+
 .map-shell {
   width: 100%;
   min-height: 360px;

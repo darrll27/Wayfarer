@@ -68,6 +68,7 @@ export default function App() {
   const qgcMapRef = useRef(null)
   const qgcMapLayersRef = useRef([])
   const qgcBaseLayerRef = useRef(null)
+  const qgcHasAutoFocusedRef = useRef(false)
 
   const addToast = useCallback((t) => {
     const id = Date.now() + Math.random()
@@ -401,6 +402,7 @@ export default function App() {
         qgcMapRef.current = null
         qgcMapLayersRef.current = []
       }
+      qgcHasAutoFocusedRef.current = false
       return
     }
     const setup = () => {
@@ -431,9 +433,15 @@ export default function App() {
       updateQgcBaseLayer()
       window.L.control.scale({position: 'bottomleft', metric: true, imperial: false}).addTo(qgcMapRef.current)
       updateQgcMapMarkers()
+      setTimeout(() => {
+        if (!qgcHasAutoFocusedRef.current) {
+          focusQgcMapOnBirds()
+          qgcHasAutoFocusedRef.current = true
+        }
+      }, 0)
     }
     setup()
-  }, [workspace, updateQgcBaseLayer])
+  }, [workspace, updateQgcBaseLayer, focusQgcMapOnBirds])
 
   useEffect(() => {
     if (workspace === 'missions' && mapRef.current) {
@@ -447,6 +455,21 @@ export default function App() {
       updateQgcMapMarkers()
     }
   }, [telemetry, workspace, mapScope, selectedBird, birdList])
+
+  useEffect(() => {
+    if (workspace !== 'qgc' || !qgcMapRef.current) return
+    const points = birdList
+      .filter((bird) => bird.lat != null && bird.lon != null)
+      .map((bird) => [bird.lat, bird.lon])
+    if (points.length === 0) {
+      qgcHasAutoFocusedRef.current = false
+      return
+    }
+    if (!qgcHasAutoFocusedRef.current) {
+      focusQgcMapOnBirds()
+      qgcHasAutoFocusedRef.current = true
+    }
+  }, [workspace, birdList, focusQgcMapOnBirds])
 
   useEffect(() => {
     if (workspace !== 'qgc' || !qgcMapRef.current) return

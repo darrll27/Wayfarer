@@ -1,6 +1,10 @@
-import React from 'react'
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 import Panel from '../components/Panel'
 import {evaluateBirdStatus, splitBirdGroups} from '../hooks/useBirds'
+
+const DEFAULT_MAP_CENTER = [37.468, -122.087]
+const DEFAULT_MAP_ZOOM = 11
+const BIRD_COLORS = ['#22d3ee', '#34d399', '#f59e0b', '#f472b6', '#a78bfa', '#fb7185', '#2dd4bf', '#60a5fa']
 
 function formatGpsFix(bird) {
   const hasPosition = bird && bird.lat !== null && bird.lon !== null
@@ -32,6 +36,16 @@ function getBatteryPercent(value) {
 export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypointsDemo, systemRange}) {
   const now = Date.now()
   const {birds, nonBirds} = splitBirdGroups(birdList || [], systemRange)
+  const [mapView, setMapView] = useState('map')
+  const airLocations = useMemo(
+    () => birds.filter((bird) => bird.lat !== null && bird.lon !== null),
+    [birds]
+  )
+  const mapContainerRef = useRef(null)
+  const mapRef = useRef(null)
+  const mapMarkersRef = useRef([])
+  const mapBaseLayerRef = useRef(null)
+  const hasAutoFocusedRef = useRef(false)
   const live = birds.filter((b) => evaluateBirdStatus(b, now).isLive)
   const dead = birds.length - live.length
   const ready = birds.filter((b) => evaluateBirdStatus(b, now).isReady)
@@ -44,6 +58,122 @@ export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypoint
     }
   })
   const ids = Array.from({length: 90}, (_, i) => i + 1)
+
+  const focusBirds = useCallback(() => {
+    if (!window.L || !mapRef.current) return
+    if (airLocations.length === 0) {
+      mapRef.current.setView(DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM)
+      return
+    }
+    const points = airLocations.map((bird) => [bird.lat, bird.lon])
+    if (points.length === 1) {
+      mapRef.current.setView(points[0], Math.max(mapRef.current.getZoom(), 14))
+      return
+    }
+    mapRef.current.fitBounds(window.L.latLngBounds(points).pad(0.3), {maxZoom: 16})
+  }, [airLocations])
+
+  const updateBaseLayer = useCallback(() => {
+    if (!window.L || !mapRef.current) return
+    if (mapBaseLayerRef.current) {
+      try { mapRef.current.removeLayer(mapBaseLayerRef.current) } catch (e) {}
+      mapBaseLayerRef.current = null
+    }
+    const layer = mapView === 'satellite'
+      ? window.L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Tiles &copy; Esri',
+        maxNativeZoom: 19,
+        maxZoom: 24
+      })
+      : window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxNativeZoom: 19,
+        maxZoom: 24
+      })
+    layer.addTo(mapRef.current)
+    mapBaseLayerRef.current = layer
+  }, [mapView])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const setup = () => {
+      if (cancelled) return
+      if (!window.L || !mapContainerRef.current) {
+        window.setTimeout(setup, 150)
+        return
+      }
+      if (mapRef.current) return
+      mapRef.current = window.L.map(mapContainerRef.current, {
+        zoomControl: true,
+        attributionControl: true
+      }).setView(DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM)
+      updateBaseLayer()
+      window.L.control.scale({position: 'bottomleft', metric: true, imperial: false}).addTo(mapRef.current)
+    }
+
+    setup()
+    return () => {
+      cancelled = true
+      if (mapRef.current) {
+        mapRef.current.remove()
+        mapRef.current = null
+      }
+      mapMarkersRef.current = []
+      mapBaseLayerRef.current = null
+    }
+  }, [updateBaseLayer])
+
+  useEffect(() => {
+    if (!mapRef.current) return
+    updateBaseLayer()
+  }, [updateBaseLayer])
+
+  useEffect(() => {
+    if (!window.L || !mapRef.current) return
+
+    mapMarkersRef.current.forEach((layer) => {
+      try { layer.remove() } catch (e) {}
+    })
+    mapMarkersRef.current = []
+
+    if (airLocations.length === 0) {
+      hasAutoFocusedRef.current = false
+      mapRef.current.setView(DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM)
+      return
+    }
+
+    airLocations.forEach((bird, index) => {
+      const status = evaluateBirdStatus(bird, now)
+      const hue = BIRD_COLORS[index % BIRD_COLORS.length]
+      const rotation = Number.isFinite(Number(bird.metrics && bird.metrics.heading)) ? Number(bird.metrics.heading) : 0
+      const iconStateClass = [
+        status.isLive ? '' : 'muted',
+        'overview-bird-icon'
+      ].filter(Boolean).join(' ')
+      const idStateClass = [
+        status.isLive ? '' : 'muted',
+        'overview-bird-id'
+      ].filter(Boolean).join(' ')
+      const icon = window.L.divIcon({
+        className: 'qgc-bird-marker overview-bird-marker',
+        html: `<div class="qgc-bird-wrap"><div class="qgc-bird-icon ${iconStateClass}" style="transform: rotate(${rotation}deg); border-color: ${hue}; color: ${hue};">➤</div><div class="qgc-bird-id ${idStateClass}" style="border-color: ${hue}; color: ${hue};">${bird.sysid}</div></div>`,
+        iconSize: [54, 40],
+        iconAnchor: [18, 18]
+      })
+      const marker = window.L.marker([bird.lat, bird.lon], {icon}).addTo(mapRef.current)
+      marker.bindTooltip(
+        `Air ${bird.sysid}<br/>${bird.lat.toFixed(5)}, ${bird.lon.toFixed(5)}<br/>${bird.metrics.alt ?? bird.metrics.hudAlt ?? 'n/a'} m`,
+        {permanent: false}
+      )
+      mapMarkersRef.current.push(marker)
+    })
+
+    if (!hasAutoFocusedRef.current) {
+      focusBirds()
+      hasAutoFocusedRef.current = true
+    }
+  }, [airLocations, now, focusBirds])
 
   return (
     <div className="grid">
@@ -151,17 +281,27 @@ export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypoint
         </div>
       </Panel>
 
-      <Panel title="Latest Telemetry">
-        <div className="telemetry-list compact">
-          {telemetry.length === 0 ? (
-            <div className="empty">No telemetry received yet.</div>
+      <Panel
+        title="Air Locations"
+        className="overview-map-panel"
+        actions={(
+          <div className="panel-actions">
+            <div className="segmented">
+              <button className={mapView === 'map' ? 'active' : ''} onClick={() => setMapView('map')}>Map</button>
+              <button className={mapView === 'satellite' ? 'active' : ''} onClick={() => setMapView('satellite')}>Satellite</button>
+            </div>
+            <button onClick={focusBirds}>Focus Birds</button>
+          </div>
+        )}
+      >
+        <div className="overview-map-wrap">
+          <div ref={mapContainerRef} className="map-shell overview-map-shell" />
+          {airLocations.length === 0 ? (
+            <div className="overview-map-empty">No air tracks observed yet.</div>
           ) : (
-            telemetry.slice(0, 10).map((t, i) => (
-              <div key={i} className="telemetry-row compact">
-                <div className="telemetry-time">{new Date(t.ts).toLocaleTimeString()}</div>
-                <div className="telemetry-topic">{t.topic}</div>
-              </div>
-            ))
+            <div className="overview-map-caption">
+              Tracking {airLocations.length} air {airLocations.length === 1 ? 'asset' : 'assets'} with live position.
+            </div>
           )}
         </div>
       </Panel>

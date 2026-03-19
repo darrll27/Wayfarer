@@ -1,5 +1,6 @@
-import React from 'react'
+import React, {useEffect, useMemo, useRef} from 'react'
 import Panel from '../components/Panel'
+import {parseDeviceTopic} from '../hooks/useBirds'
 
 function formatGpsFix(record) {
   const hasPosition = record && record.lat !== null && record.lon !== null
@@ -21,6 +22,62 @@ export default function BirdWorkspace({
   selectedBirdHeartbeat,
   selectedBirdTelemetry
 }) {
+  const recentTelemetry = Array.isArray(selectedBirdTelemetry) ? selectedBirdTelemetry : []
+  const seenPacketTypesRef = useRef(new Map())
+
+  useEffect(() => {
+    const birdKey = selectedBird ? String(selectedBird) : '__none__'
+    if (!seenPacketTypesRef.current.has(birdKey)) {
+      seenPacketTypesRef.current.set(birdKey, new Map())
+    }
+    const registry = seenPacketTypesRef.current.get(birdKey)
+    recentTelemetry.forEach((entry) => {
+      const parsed = parseDeviceTopic(entry.topic)
+      if (!parsed || !parsed.msgType) return
+      const ts = Number(entry.ts) || 0
+      const existing = registry.get(parsed.msgType) || {lastSeen: 0, totalCount: 0}
+      registry.set(parsed.msgType, {
+        lastSeen: Math.max(existing.lastSeen, ts),
+        totalCount: existing.totalCount + 1
+      })
+    })
+  }, [recentTelemetry, selectedBird])
+
+  const packetRates = useMemo(() => {
+    const WINDOW_MS = 8000
+    const nowCutoff = Date.now() - WINDOW_MS
+    const liveGroups = new Map()
+    recentTelemetry.forEach((entry) => {
+      const parsed = parseDeviceTopic(entry.topic)
+      if (!parsed || !parsed.msgType) return
+      const bucket = liveGroups.get(parsed.msgType) || []
+      bucket.push(Number(entry.ts))
+      liveGroups.set(parsed.msgType, bucket)
+    })
+
+    const birdKey = selectedBird ? String(selectedBird) : '__none__'
+    const registry = seenPacketTypesRef.current.get(birdKey) || new Map()
+    const allTypes = new Set([...registry.keys(), ...liveGroups.keys()])
+
+    return Array.from(allTypes)
+      .map((msgType) => {
+        const samples = (liveGroups.get(msgType) || []).slice().sort((a, b) => a - b)
+        const active = samples.filter((ts) => ts >= nowCutoff)
+        const spanMs = active.length > 1 ? Math.max(active[active.length - 1] - active[0], 1000) : WINDOW_MS
+        const hz = active.length > 1 ? ((active.length - 1) * 1000) / spanMs : (active.length * 1000) / WINDOW_MS
+        const historical = registry.get(msgType) || {lastSeen: 0, totalCount: 0}
+        const liveLastSeen = samples.length > 0 ? samples[samples.length - 1] : 0
+        return {
+          msgType,
+          hz: active.length > 0 ? hz : 0,
+          activeCount: active.length,
+          totalCount: Math.max(historical.totalCount, samples.length),
+          lastSeen: Math.max(historical.lastSeen, liveLastSeen)
+        }
+      })
+      .sort((a, b) => a.msgType.localeCompare(b.msgType))
+  }, [recentTelemetry, selectedBird])
+
   return (
     <div className="grid">
       <Panel title={selectedBird ? `Bird ${selectedBird} Overview` : 'Select a Bird'}>
@@ -35,12 +92,46 @@ export default function BirdWorkspace({
               <div className="mono">{selectedBirdHeartbeat ? new Date(selectedBirdHeartbeat).toLocaleTimeString() : 'not seen'}</div>
             </div>
             <div>
-              <div className="label">Position</div>
-              <div className="mono">{selectedBirdRecord.lat !== null && selectedBirdRecord.lon !== null ? `${selectedBirdRecord.lat.toFixed(5)}, ${selectedBirdRecord.lon.toFixed(5)}` : 'no fix'}</div>
+              <div className="label">Ingress</div>
+              <div className="mono">{packetRates.length > 0 ? `${packetRates.length} packet classes tracked` : 'no packet types observed yet'}</div>
             </div>
           </div>
         ) : (
           <div className="empty">Pick a bird from the left.</div>
+        )}
+      </Panel>
+      <Panel title="Packet Rates">
+        {selectedBirdRecord ? (
+          packetRates.length === 0 ? (
+            <div className="empty">No recent packet rates for this bird yet.</div>
+          ) : (
+            <div className="packet-rate-table-wrap">
+              <table className="packet-rate-table">
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>Ingress</th>
+                    <th>Window</th>
+                    <th>Last Seen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {packetRates.map((item) => (
+                    <tr key={item.msgType}>
+                      <td className="packet-type-cell">{item.msgType}</td>
+                      <td className={item.hz > 0 ? 'packet-rate-hot' : 'packet-rate-cold'}>
+                        {item.hz.toFixed(item.hz >= 10 ? 0 : 1)} Hz
+                      </td>
+                      <td>{item.activeCount} / 8s</td>
+                      <td>{item.lastSeen ? new Date(item.lastSeen).toLocaleTimeString() : 'n/a'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        ) : (
+          <div className="empty">No bird selected.</div>
         )}
       </Panel>
       <Panel title="Bird Metrics">
@@ -82,12 +173,16 @@ export default function BirdWorkspace({
               <div className="label">Battery</div>
               <div className="mono">{selectedBirdRecord.metrics.battery ?? 'n/a'}%</div>
             </div>
+            <div className="metric">
+              <div className="label">Position</div>
+              <div className="mono">{selectedBirdRecord.lat !== null && selectedBirdRecord.lon !== null ? `${selectedBirdRecord.lat.toFixed(5)}, ${selectedBirdRecord.lon.toFixed(5)}` : 'no fix'}</div>
+            </div>
           </div>
         ) : (
           <div className="empty">No metrics yet.</div>
         )}
       </Panel>
-      <Panel title="Bird Telemetry">
+      <Panel title="Latest Telemetry Bursts">
         <div className="telemetry-list">
           {selectedBirdTelemetry.length === 0 ? (
             <div className="empty">No telemetry for this bird yet.</div>
