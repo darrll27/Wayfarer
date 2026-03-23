@@ -5,10 +5,26 @@ import fs from 'fs'
 import { fileURLToPath } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const brokerConfigPath = path.resolve(__dirname, '../config/broker.json')
+
+function readFrontendHostMode() {
+  try {
+    if (!fs.existsSync(brokerConfigPath)) return 'localhost'
+    const raw = fs.readFileSync(brokerConfigPath, 'utf8')
+    const parsed = JSON.parse(raw)
+    return String(parsed.frontend_host_mode || 'localhost').toLowerCase() === 'lan' ? 'lan' : 'localhost'
+  } catch (e) {
+    return 'localhost'
+  }
+}
+
+const frontendHostMode = readFrontendHostMode()
+const viteHost = frontendHostMode === 'lan' ? '0.0.0.0' : '127.0.0.1'
 
 export default defineConfig({
   plugins: [react()],
   server: {
+    host: viteHost,
     port: 5173,
     watch: {
       usePolling: process.env.CHOKIDAR_USEPOLLING === '1',

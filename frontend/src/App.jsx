@@ -31,6 +31,8 @@ const FOCUS_BIRDS_MAX_ZOOM = 19
 
 export default function App() {
   const [toasts, setToasts] = useState([])
+  const [notifications, setNotifications] = useState([])
+  const [notificationCenterOpen, setNotificationCenterOpen] = useState(false)
   const [workspace, setWorkspace] = useState('overview')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [birdFilter, setBirdFilter] = useState('')
@@ -72,11 +74,16 @@ export default function App() {
 
   const addToast = useCallback((t) => {
     const id = Date.now() + Math.random()
-    const entry = {...t, id}
+    const entry = {...t, id, ts: Date.now(), read: false}
     setToasts((s) => [entry].concat(s).slice(0, 6))
+    setNotifications((s) => [entry].concat(s).slice(0, 100))
     setTimeout(() => {
       setToasts((s) => s.filter(x => x.id !== id))
     }, 6000)
+  }, [])
+
+  const clearNotifications = useCallback(() => {
+    setNotifications([])
   }, [])
 
   const {
@@ -129,11 +136,17 @@ export default function App() {
     const onKeyDown = (e) => {
       if (e.key === 'Escape') {
         setSidebarOpen(false)
+        setNotificationCenterOpen(false)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
+
+  useEffect(() => {
+    if (!notificationCenterOpen) return
+    setNotifications((items) => items.map((item) => ({...item, read: true})))
+  }, [notificationCenterOpen])
 
   const filteredTelemetry = logFilter
     ? telemetry.filter(t => t.topic.toLowerCase().includes(logFilter.toLowerCase()) || t.msg.toLowerCase().includes(logFilter.toLowerCase()))
@@ -301,7 +314,7 @@ export default function App() {
       ].filter(Boolean).join(' ')
       const icon = window.L.divIcon({
         className: 'qgc-bird-marker',
-        html: `<div class="qgc-bird-wrap"><div class="qgc-bird-icon ${iconStateClass}" style="transform: rotate(${rotation}deg)">➤</div><div class="qgc-bird-id ${idStateClass}">${birdLabel}</div></div>`,
+        html: `<div class="qgc-bird-wrap"><div class="qgc-bird-icon ${iconStateClass}" style="transform: rotate(${rotation}deg)">▲</div><div class="qgc-bird-id ${idStateClass}">${birdLabel}</div></div>`,
         iconSize: [54, 40],
         iconAnchor: [18, 18]
       })
@@ -335,6 +348,8 @@ export default function App() {
 
   const updateQgcBaseLayer = useCallback(() => {
     if (!window.L || !qgcMapRef.current) return
+    const currentCenter = qgcMapRef.current.getCenter()
+    const currentZoom = qgcMapRef.current.getZoom()
     if (qgcBaseLayerRef.current) {
       try { qgcMapRef.current.removeLayer(qgcBaseLayerRef.current) } catch (e) {}
       qgcBaseLayerRef.current = null
@@ -353,6 +368,9 @@ export default function App() {
       })
     layer.addTo(qgcMapRef.current)
     qgcBaseLayerRef.current = layer
+    if (currentCenter && Number.isFinite(currentZoom)) {
+      qgcMapRef.current.setView(currentCenter, currentZoom, {animate: false})
+    }
   }, [qgcMapView])
 
   // initialize map when Missions workspace is opened
@@ -616,11 +634,18 @@ export default function App() {
 
   async function saveBrokerConfig(nextConfig) {
     try {
-      const r = await fetch('/api/config', {
+      let r = await fetch('/api/config', {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(nextConfig)
       })
+      if (r.status === 405) {
+        r = await fetch('/api/config', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(nextConfig)
+        })
+      }
       const j = await r.json()
       if (!r.ok || !j.ok) {
         addToast({title: 'Broker config save failed', body: JSON.stringify(j)})
@@ -657,11 +682,15 @@ export default function App() {
         workspace={workspace}
         setWorkspace={setWorkspace}
         connStatus={connStatus}
-        backendStatusLabel={backendStatusLabel}
-        brokerConfig={brokerConfig}
-        brokerMissing={brokerMissing}
-        isElectron={isElectron}
-      />
+          backendStatusLabel={backendStatusLabel}
+          brokerConfig={brokerConfig}
+          brokerMissing={brokerMissing}
+          isElectron={isElectron}
+          notifications={notifications}
+          notificationCenterOpen={notificationCenterOpen}
+          setNotificationCenterOpen={setNotificationCenterOpen}
+          clearNotifications={clearNotifications}
+        />
 
       <div className="app-body">
         <button
@@ -747,6 +776,7 @@ export default function App() {
 
           {workspace === 'logs' && (
             <LogsWorkspace
+              telemetry={telemetry}
               filteredTelemetry={filteredTelemetry}
               logFilter={logFilter}
               setLogFilter={setLogFilter}

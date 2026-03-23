@@ -103,6 +103,7 @@ button, input, select, textarea {
 }
 
 .broker-summary {
+  position: relative;
   text-align: right;
 }
 
@@ -114,6 +115,122 @@ button, input, select, textarea {
 .broker-summary .value {
   font-size: 14px;
   font-weight: 600;
+}
+
+.header-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.notification-center-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  background: rgba(8, 14, 24, 0.7);
+  color: var(--text);
+}
+
+.notification-center-toggle.active {
+  border-color: rgba(94, 234, 212, 0.38);
+  background: rgba(15, 23, 42, 0.92);
+}
+
+.notification-count {
+  min-width: 24px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(51, 65, 85, 0.9);
+  color: #dbeafe;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.notification-count.has-unread {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.82), rgba(45, 212, 191, 0.82));
+  color: #04111f;
+}
+
+.notification-center {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 12px);
+  width: min(380px, 92vw);
+  max-height: min(62vh, 560px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(125, 211, 252, 0.14);
+  background: linear-gradient(180deg, rgba(10, 16, 30, 0.98), rgba(7, 12, 24, 0.98));
+  box-shadow: var(--shadow);
+  z-index: 2400;
+}
+
+.notification-center-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.notification-center-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #a5f3fc;
+}
+
+.notification-center-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.notification-item {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(10, 16, 30, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.notification-item.unread {
+  border-color: rgba(94, 234, 212, 0.34);
+  background: linear-gradient(180deg, rgba(13, 25, 42, 0.9), rgba(8, 14, 24, 0.94));
+}
+
+.notification-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.notification-item-title {
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.notification-item-time {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.notification-item-body {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 .app-body {
@@ -899,6 +1016,19 @@ button.ghost {
   font-weight: 700;
 }
 
+.telemetry-coverage-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.telemetry-coverage-rawonly {
+  color: #fbbf24;
+  font-weight: 700;
+}
+
+.telemetry-coverage-empty {
+  text-align: center;
+}
+
 .overview-map-wrap {
   position: relative;
   display: flex;
@@ -1123,6 +1253,13 @@ button.ghost {
   }
   .broker-summary {
     text-align: left;
+  }
+  .header-actions {
+    justify-content: flex-start;
+  }
+  .notification-center {
+    left: 0;
+    right: auto;
   }
   .sidebar-drawer {
     width: min(320px, 94vw);

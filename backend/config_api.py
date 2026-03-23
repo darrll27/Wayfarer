@@ -153,6 +153,7 @@ def _validate_and_normalize_broker_config(payload: dict):
     username = payload.get('username')
     password = payload.get('password')
     notes = payload.get('notes')
+    frontend_host_mode = str(payload.get('frontend_host_mode', 'localhost')).strip().lower()
 
     if username is not None and not isinstance(username, str):
         raise HTTPException(status_code=400, detail='username must be a string or null')
@@ -160,12 +161,15 @@ def _validate_and_normalize_broker_config(payload: dict):
         raise HTTPException(status_code=400, detail='password must be a string or null')
     if notes is not None and not isinstance(notes, str):
         raise HTTPException(status_code=400, detail='notes must be a string or null')
+    if frontend_host_mode not in ('localhost', 'lan'):
+        raise HTTPException(status_code=400, detail='frontend_host_mode must be "localhost" or "lan"')
 
     return {
         'mode': mode,
         'host': host,
         'tcp_port': tcp_port,
         'ws_port': ws_port,
+        'frontend_host_mode': frontend_host_mode,
         'username': username if username else None,
         'password': password if password else None,
         'notes': notes if isinstance(notes, str) and notes.strip() else (
@@ -190,11 +194,12 @@ def get_config():
     return JSONResponse(content=data)
 
 
-@app.put('/api/config')
+@app.api_route('/api/config', methods=['PUT', 'POST'])
 def update_config(payload: dict):
     """Update centralized broker.json content.
 
-    Accepted payload keys: mode, host, tcp_port, ws_port, username, password, notes.
+    Accepted payload keys: mode, host, tcp_port, ws_port, frontend_host_mode,
+    username, password, notes.
     """
     cfg = _validate_and_normalize_broker_config(payload)
     try:

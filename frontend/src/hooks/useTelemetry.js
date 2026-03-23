@@ -248,7 +248,7 @@ export default function useTelemetry(addToast) {
       const pending = telemetryBufferRef.current
       if (!pending.length) return
       telemetryBufferRef.current = []
-      setTelemetry((s) => pending.concat(s).slice(0, 500))
+      setTelemetry((s) => pending.concat(s).slice(0, 5000))
     }, 120)
     telemetryWatchdogInterval = setInterval(async () => {
       if (connStatusRef.current !== 'connected') return

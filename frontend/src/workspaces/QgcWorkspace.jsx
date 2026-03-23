@@ -16,6 +16,10 @@ export default function QgcWorkspace({
   setQgcMapView,
   focusQgcMapOnBirds
 }) {
+  const handleMapViewChange = (nextView) => {
+    setQgcMapView((current) => (current === nextView ? current : nextView))
+  }
+
   return (
     <div className="grid qgc-grid">
       <Panel title="QGC Control">
@@ -57,8 +61,8 @@ export default function QgcWorkspace({
       <Panel className="qgc-map-panel" title="Multi-drone Map" actions={(
         <div className="panel-actions">
           <div className="segmented">
-            <button className={qgcMapView === 'map' ? 'active' : ''} onClick={() => setQgcMapView('map')}>Map</button>
-            <button className={qgcMapView === 'satellite' ? 'active' : ''} onClick={() => setQgcMapView('satellite')}>Satellite</button>
+            <button className={qgcMapView === 'map' ? 'active' : ''} onClick={() => handleMapViewChange('map')}>Map</button>
+            <button className={qgcMapView === 'satellite' ? 'active' : ''} onClick={() => handleMapViewChange('satellite')}>Satellite</button>
           </div>
           <div className="segmented">
             <button className={mapScope === 'all' ? 'active' : ''} onClick={() => setQgcScopeAndFocus('all')}>All birds</button>

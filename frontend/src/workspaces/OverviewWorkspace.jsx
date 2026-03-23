@@ -73,8 +73,14 @@ export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypoint
     mapRef.current.fitBounds(window.L.latLngBounds(points).pad(0.3), {maxZoom: 16})
   }, [airLocations])
 
+  const handleMapViewChange = useCallback((nextView) => {
+    setMapView((current) => (current === nextView ? current : nextView))
+  }, [])
+
   const updateBaseLayer = useCallback(() => {
     if (!window.L || !mapRef.current) return
+    const currentCenter = mapRef.current.getCenter()
+    const currentZoom = mapRef.current.getZoom()
     if (mapBaseLayerRef.current) {
       try { mapRef.current.removeLayer(mapBaseLayerRef.current) } catch (e) {}
       mapBaseLayerRef.current = null
@@ -92,6 +98,9 @@ export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypoint
       })
     layer.addTo(mapRef.current)
     mapBaseLayerRef.current = layer
+    if (currentCenter && Number.isFinite(currentZoom)) {
+      mapRef.current.setView(currentCenter, currentZoom, {animate: false})
+    }
   }, [mapView])
 
   useEffect(() => {
@@ -157,7 +166,7 @@ export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypoint
       ].filter(Boolean).join(' ')
       const icon = window.L.divIcon({
         className: 'qgc-bird-marker overview-bird-marker',
-        html: `<div class="qgc-bird-wrap"><div class="qgc-bird-icon ${iconStateClass}" style="transform: rotate(${rotation}deg); border-color: ${hue}; color: ${hue};">➤</div><div class="qgc-bird-id ${idStateClass}" style="border-color: ${hue}; color: ${hue};">${bird.sysid}</div></div>`,
+        html: `<div class="qgc-bird-wrap"><div class="qgc-bird-icon ${iconStateClass}" style="transform: rotate(${rotation}deg); border-color: ${hue}; color: ${hue};">▲</div><div class="qgc-bird-id ${idStateClass}" style="border-color: ${hue}; color: ${hue};">${bird.sysid}</div></div>`,
         iconSize: [54, 40],
         iconAnchor: [18, 18]
       })
@@ -287,8 +296,8 @@ export default function OverviewWorkspace({birdList, telemetry, sendLoadWaypoint
         actions={(
           <div className="panel-actions">
             <div className="segmented">
-              <button className={mapView === 'map' ? 'active' : ''} onClick={() => setMapView('map')}>Map</button>
-              <button className={mapView === 'satellite' ? 'active' : ''} onClick={() => setMapView('satellite')}>Satellite</button>
+              <button className={mapView === 'map' ? 'active' : ''} onClick={() => handleMapViewChange('map')}>Map</button>
+              <button className={mapView === 'satellite' ? 'active' : ''} onClick={() => handleMapViewChange('satellite')}>Satellite</button>
             </div>
             <button onClick={focusBirds}>Focus Birds</button>
           </div>

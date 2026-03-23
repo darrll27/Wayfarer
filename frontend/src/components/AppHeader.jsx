@@ -9,8 +9,14 @@ export default function AppHeader({
   backendStatusLabel,
   brokerConfig,
   brokerMissing,
-  isElectron
+  isElectron,
+  notifications,
+  notificationCenterOpen,
+  setNotificationCenterOpen,
+  clearNotifications
 }) {
+  const unreadCount = (notifications || []).filter((item) => !item.read).length
+
   return (
     <header className="app-header">
       <div className="app-title">
@@ -39,6 +45,41 @@ export default function AppHeader({
         <div className="value">
           {brokerConfig ? `${brokerConfig.host}:${isElectron ? brokerConfig.tcp_port : brokerConfig.ws_port}` : (brokerMissing ? 'missing' : 'loading...')}
         </div>
+        <div className="header-actions">
+          <button
+            className={`notification-center-toggle ${notificationCenterOpen ? 'active' : ''}`}
+            onClick={() => setNotificationCenterOpen((open) => !open)}
+            aria-label="Open notification center"
+          >
+            <span>Notifications</span>
+            <span className={`notification-count ${unreadCount > 0 ? 'has-unread' : ''}`}>{unreadCount}</span>
+          </button>
+        </div>
+        {notificationCenterOpen ? (
+          <div className="notification-center">
+            <div className="notification-center-header">
+              <div className="notification-center-title">Notification Center</div>
+              <button className="ghost" onClick={clearNotifications}>Clear</button>
+            </div>
+            <div className="notification-center-list">
+              {(notifications || []).length === 0 ? (
+                <div className="empty">No notifications yet.</div>
+              ) : (
+                notifications.map((item) => (
+                  <div key={item.id} className={`notification-item ${item.read ? '' : 'unread'}`}>
+                    <div className="notification-item-head">
+                      <div className="notification-item-title">{item.title}</div>
+                      <div className="notification-item-time">
+                        {item.ts ? new Date(item.ts).toLocaleTimeString() : ''}
+                      </div>
+                    </div>
+                    <div className="notification-item-body">{item.body}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        ) : null}
       </div>
     </header>
   )

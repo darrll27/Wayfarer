@@ -16,6 +16,7 @@ export default function SettingsWorkspace({
   const [host, setHost] = useState('localhost')
   const [tcpPort, setTcpPort] = useState(1883)
   const [wsPort, setWsPort] = useState(1884)
+  const [frontendHostMode, setFrontendHostMode] = useState('localhost')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [notes, setNotes] = useState('')
@@ -26,6 +27,7 @@ export default function SettingsWorkspace({
     setHost(String(brokerConfig.host || 'localhost'))
     setTcpPort(Number(brokerConfig.tcp_port || 1883))
     setWsPort(Number(brokerConfig.ws_port || 1884))
+    setFrontendHostMode(String(brokerConfig.frontend_host_mode || 'localhost'))
     setUsername(String(brokerConfig.username || ''))
     setPassword(String(brokerConfig.password || ''))
     setNotes(String(brokerConfig.notes || ''))
@@ -37,6 +39,7 @@ export default function SettingsWorkspace({
       host: String(host || '').trim(),
       tcp_port: Number(tcpPort),
       ws_port: Number(wsPort),
+      frontend_host_mode: frontendHostMode,
       username: username.trim() ? username.trim() : null,
       password: password.trim() ? password.trim() : null,
       notes: notes.trim() ? notes : null
@@ -136,6 +139,17 @@ export default function SettingsWorkspace({
                 WebSocket port is used by the React and Electron renderer UI when it connects to MQTT from the browser-like frontend runtime. Default: `1884`.
               </div>
             ) : null}
+          </div>
+
+          <div className="field">
+            <label>Frontend Access</label>
+            <select className="input" value={frontendHostMode} onChange={(e) => setFrontendHostMode(e.target.value)}>
+              <option value="localhost">localhost only</option>
+              <option value="lan">LAN access</option>
+            </select>
+            <div className="field-help">
+              `localhost only` binds the Vite dev server to `127.0.0.1`. `LAN access` binds it to `0.0.0.0` so other devices on the same subnet can open `http://your-ip:5173`. Requires frontend restart.
+            </div>
           </div>
 
           <div className="field">
