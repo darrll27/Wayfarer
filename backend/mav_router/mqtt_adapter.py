@@ -31,6 +31,11 @@ from backend.config_manager import resolve_endpoint
 class MissionManager:
     """Handles mission upload/download operations with proper state management and verification."""
 
+    # Seconds to wait for a response before retrying
+    _ITEM_TIMEOUT = 2.0
+    # Max retries per item request before falling back to non-INT, then giving up
+    _MAX_RETRIES = 3
+
     def __init__(self, cfg: dict, router, ports: Dict[str, Dict], mqtt_client):
         self.cfg = cfg
         self.router = router
@@ -41,6 +46,78 @@ class MissionManager:
         self.upload_states: Dict[int, Dict] = {}
         # Download states: sysid -> {'state', 'mission', 'start_time', 'target_comp'}
         self.download_states: Dict[int, Dict] = {}
+
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self._watchdog_thread.start()
+
+    def _watchdog_loop(self):
+        """Background thread: retry stalled active downloads."""
+        while True:
+            time.sleep(1.0)
+            try:
+                self._check_stalled_downloads()
+            except Exception as e:
+                print(f"[mission_manager] watchdog error: {e}")
+
+    def _check_stalled_downloads(self):
+        now = time.time()
+        src_sys = self.cfg.get("gcs_sysid", 255)
+        src_comp = self.cfg.get("gcs_compid", 1)
+
+        for sysid, state in list(self.download_states.items()):
+            if state.get('mode') != 'active':
+                continue
+            if state.get('state') not in ('requesting_list', 'downloading'):
+                continue
+
+            last_activity = float(state.get('last_activity_ts') or state.get('start_time') or 0)
+            if (now - last_activity) < self._ITEM_TIMEOUT:
+                continue
+
+            retries = int(state.get('retries', 0))
+            compid = int(state.get('target_comp', 1))
+
+            if state['state'] == 'requesting_list':
+                # No MISSION_COUNT received — resend MISSION_REQUEST_LIST
+                if retries >= self._MAX_RETRIES:
+                    print(f"[mission_manager] giving up on download from {sysid} after {retries} retries (no MISSION_COUNT)")
+                    self._publish_download_status(sysid, compid, 'failed', {'phase': 'mission_request_list', 'reason': 'timeout'})
+                    state['state'] = 'failed'
+                    continue
+                print(f"[mission_manager] retry {retries+1}: resending MISSION_REQUEST_LIST to {sysid}")
+                out_bytes = mavlink_encoder.encode_mission_request_list(sysid, compid, src_sys=src_sys, src_comp=src_comp)
+                if self._send_to_drone(sysid, out_bytes):
+                    state['retries'] = retries + 1
+                    state['last_activity_ts'] = now
+                    self._publish_download_status(sysid, compid, 'request_sent', {'phase': 'mission_request_list', 'retry': retries + 1})
+
+            elif state['state'] == 'downloading':
+                # Find the lowest seq we're still waiting for
+                mission = state.get('mission') or []
+                pending_seq = next((i for i, item in enumerate(mission) if item is None), None)
+                if pending_seq is None:
+                    continue  # all received, completion handled elsewhere
+
+                use_non_int = retries >= self._MAX_RETRIES
+                if retries >= self._MAX_RETRIES * 2:
+                    print(f"[mission_manager] giving up on download from {sysid} seq={pending_seq} after {retries} retries")
+                    self._publish_download_status(sysid, compid, 'failed', {'phase': 'mission_request_int', 'seq': pending_seq, 'reason': 'timeout'})
+                    state['state'] = 'failed'
+                    continue
+
+                if use_non_int:
+                    print(f"[mission_manager] retry {retries+1}: falling back to MISSION_REQUEST (non-INT) for {sysid} seq={pending_seq}")
+                    out_bytes = mavlink_encoder.encode_mission_request(sysid, compid, pending_seq, src_sys=src_sys, src_comp=src_comp)
+                    phase = 'mission_request'
+                else:
+                    print(f"[mission_manager] retry {retries+1}: resending MISSION_REQUEST_INT to {sysid} seq={pending_seq}")
+                    out_bytes = mavlink_encoder.encode_mission_request_int(sysid, compid, pending_seq, src_sys=src_sys, src_comp=src_comp)
+                    phase = 'mission_request_int'
+
+                if self._send_to_drone(sysid, out_bytes):
+                    state['retries'] = retries + 1
+                    state['last_activity_ts'] = now
+                    self._publish_download_status(sysid, compid, 'request_sent', {'phase': phase, 'seq': pending_seq, 'retry': retries + 1})
 
     def _publish_download_status(self, sysid: int, compid: int, status: str, extra: Dict[str, Any] | None = None):
         payload = {
@@ -80,10 +157,14 @@ class MissionManager:
 
     def start_mission_download(self, sysid: int, compid: int):
         """Start mission download from drone."""
+        now = time.time()
         self.download_states[sysid] = {
             'state': 'requesting_list',
+            'mode': 'active',
             'mission': [],
-            'start_time': time.time(),
+            'start_time': now,
+            'last_activity_ts': now,
+            'retries': 0,
             'target_comp': compid
         }
 
@@ -97,6 +178,51 @@ class MissionManager:
             return True
         self._publish_download_status(sysid, compid, 'request_send_failed', {'phase': 'mission_request_list'})
         return False
+
+    def observe_external_mission_request(self, requester_sysid: int | None, requester_compid: int | None, target_sysid: int | None, target_compid: int | None, request_type: str):
+        """Record mission requests initiated by other GCS clients (e.g. QGC)."""
+        if target_sysid is None:
+            return
+        try:
+            target_sysid = int(target_sysid)
+        except Exception:
+            return
+        # External mission download requests should target vehicles (sysid < 250).
+        if target_sysid >= 250:
+            return
+        try:
+            target_compid = int(target_compid) if target_compid is not None else 1
+        except Exception:
+            target_compid = 1
+
+        state = self.download_states.get(target_sysid)
+        if not state or state.get('mode') != 'active':
+            self.download_states[target_sysid] = {
+                'state': 'requesting_list',
+                'mode': 'passive',
+                'mission': [],
+                'start_time': time.time(),
+                'target_comp': target_compid
+            }
+
+        self._publish_download_status(
+            target_sysid,
+            target_compid,
+            'request_observed',
+            {
+                'phase': str(request_type or 'mission_request').lower(),
+                'source': 'passive',
+                'requester_sysid': requester_sysid,
+                'requester_compid': requester_compid
+            }
+        )
+        try:
+            print(
+                f"[mission_manager] observed external mission request type={request_type} "
+                f"requester={requester_sysid}/{requester_compid} target={target_sysid}/{target_compid}"
+            )
+        except Exception:
+            pass
 
     def handle_mission_ack(self, sysid: int, compid: int):
         """Handle MISSION_ACK - verify upload completion."""
@@ -148,17 +274,71 @@ class MissionManager:
     def handle_mission_item(self, sysid: int, compid: int, seq: int, item_data: dict):
         """Handle MISSION_ITEM during download."""
         state = self.download_states.get(sysid)
-        if not state or state['state'] != 'downloading':
-            return
+        if not state or state.get('state') not in ('downloading', 'passive_observing'):
+            # If interception starts late, we may miss MISSION_REQUEST/MISSION_COUNT.
+            # Capture orphan mission items in passive mode so UI can still build a partial plan.
+            inferred_len = max(int(seq) + 1, 1)
+            state = {
+                'state': 'passive_observing',
+                'mode': 'passive',
+                'mission': [None] * inferred_len,
+                'start_time': time.time(),
+                'target_comp': compid,
+                'inferred_count': True,
+            }
+            self.download_states[sysid] = state
+            self._publish_download_status(
+                sysid,
+                compid,
+                'passive_observing',
+                {'phase': 'mission_item_orphan', 'seq': int(seq), 'count': inferred_len, 'source': 'passive'}
+            )
         print(f"[mission_manager] received mission item seq={seq} from {sysid}")
+        now = time.time()
+        # Any incoming item means the drone is alive and responding — reset watchdog
+        state['last_activity_ts'] = now
+        state['retries'] = 0
         if seq < len(state['mission']):
+            was_empty = state['mission'][seq] is None
             state['mission'][seq] = item_data
+
+            if was_empty and state.get('mode') == 'passive':
+                captured_count = sum(1 for item in state['mission'] if item is not None)
+                self._publish_download_status(
+                    sysid,
+                    compid,
+                    'passive_observing',
+                    {'phase': 'mission_item', 'seq': int(seq), 'count': len(state['mission']), 'captured_count': captured_count, 'source': 'passive'}
+                )
+                # Publish periodic partial snapshots so UI can build mission plans from interceptions.
+                last_snapshot_ts = float(state.get('last_snapshot_ts') or 0.0)
+                if (now - last_snapshot_ts) >= 0.25:
+                    try:
+                        partial_payload = json.dumps({
+                            'sysid': sysid,
+                            'compid': compid,
+                            'mission': [item for item in state['mission'] if item is not None],
+                            'count': len(state['mission']),
+                            'captured_count': captured_count,
+                            'download_duration': now - state['start_time'],
+                            'source': 'passive',
+                            'complete': False,
+                            'partial': True
+                        })
+                        self.mqtt_client.publish(f"Nomad/missions/downloaded/{sysid}", partial_payload)
+                        print(f"[mission_manager] published partial mission snapshot for {sysid} captured={captured_count}/{len(state['mission'])}")
+                        state['last_snapshot_ts'] = now
+                    except Exception as e:
+                        print(f"[mission_manager] failed to publish partial mission snapshot for {sysid}: {e}")
 
             # Check if download is complete
             if all(item is not None for item in state['mission']):
                 print(f"[mission_manager] all items received for {sysid}, completing download")
                 self._complete_download(sysid, compid, state)
             else:
+                # Passive background observe mode should never drive the transfer.
+                if state.get('mode') == 'passive':
+                    return
                 # Request next item
                 next_seq = seq + 1
                 if next_seq < len(state['mission']):
@@ -169,22 +349,43 @@ class MissionManager:
                     if not self._send_to_drone(sysid, out_bytes):
                         print(f"[mission_manager] failed to request next item seq={next_seq} for {sysid} — target not observed or send failed")
                         self._publish_download_status(sysid, compid, 'request_send_failed', {'phase': 'mission_request_int', 'seq': next_seq})
+        else:
+            # Some stacks can emit out-of-order items; keep buffer large enough.
+            if state.get('mode') == 'passive':
+                missing = (seq + 1) - len(state['mission'])
+                if missing > 0:
+                    state['mission'].extend([None] * missing)
+                state['mission'][seq] = item_data
+                captured_count = sum(1 for item in state['mission'] if item is not None)
+                self._publish_download_status(
+                    sysid,
+                    compid,
+                    'passive_observing',
+                    {'phase': 'mission_item', 'seq': int(seq), 'count': len(state['mission']), 'captured_count': captured_count, 'source': 'passive'}
+                )
 
     def _complete_download(self, sysid: int, compid: int, state: dict):
         """Complete mission download and publish results."""
         state['state'] = 'completed'
         duration = time.time() - state['start_time']
+        mission_items = state.get('mission') or []
+        if any(item is None for item in mission_items):
+            mission_items = [item for item in mission_items if item is not None]
 
         try:
             mission_payload = json.dumps({
                 'sysid': sysid,
                 'compid': compid,
-                'mission': state['mission'],
-                'count': len(state['mission']),
-                'download_duration': duration
+                'mission': mission_items,
+                'count': len(state.get('mission') or []),
+                'captured_count': len(mission_items),
+                'download_duration': duration,
+                'source': state.get('mode', 'active'),
+                'complete': len(mission_items) == len(state.get('mission') or []),
+                'partial': len(mission_items) != len(state.get('mission') or [])
             })
             self.mqtt_client.publish(f"Nomad/missions/downloaded/{sysid}", mission_payload)
-            print(f"[mission_manager] published downloaded mission from {sysid} ({len(state['mission'])} items) in {duration:.1f}s")
+            print(f"[mission_manager] published downloaded mission from {sysid} ({len(mission_items)}/{len(state.get('mission') or [])} items) in {duration:.1f}s")
         except Exception as e:
             print(f"[mission_manager] failed to publish downloaded mission: {e}")
 
@@ -243,24 +444,88 @@ class MissionManager:
     def handle_mission_count(self, sysid: int, compid: int, count: int):
         """Handle MISSION_COUNT received from vehicle to start download state."""
         print(f"[mission_manager] received MISSION_COUNT={count} from {sysid}/{compid}")
+        existing = self.download_states.get(sysid)
+        is_active_request = bool(existing and existing.get('mode') == 'active' and existing.get('state') in ('requesting_list', 'downloading'))
+        existing_len = len(existing.get('mission') or []) if existing else 0
+        if existing and existing.get('state') in ('downloading', 'passive_observing') and existing_len == int(count):
+            # Duplicate MISSION_COUNT is common when multiple listeners are present.
+            # Keep in-progress buffer to avoid losing already captured items.
+            if existing.get('mode') == 'passive':
+                self._publish_download_status(
+                    sysid,
+                    compid,
+                    'passive_observing',
+                    {'phase': 'mission_count', 'count': int(count), 'source': 'passive', 'note': 'duplicate_count_ignored'}
+                )
+                print(f"[mission_manager] duplicate MISSION_COUNT ignored for passive intercept sysid={sysid} count={count}")
+                return
+            if existing.get('mode') == 'active':
+                print(f"[mission_manager] duplicate MISSION_COUNT ignored for active download sysid={sysid} count={count}")
+                return
         if count == 0:
             # nothing to download
             self.download_states[sysid] = {
                 'state': 'completed',
+                'mode': 'active' if is_active_request else 'passive',
                 'mission': [],
                 'start_time': time.time(),
                 'target_comp': compid,
             }
             print(f"[mission_manager] remote reports 0 mission items for {sysid}; marked completed")
+            self._publish_download_status(
+                sysid,
+                compid,
+                'completed',
+                {'phase': 'mission_count', 'count': 0, 'source': 'active' if is_active_request else 'passive'}
+            )
+            try:
+                self.mqtt_client.publish(
+                    f"Nomad/missions/downloaded/{sysid}",
+                    json.dumps({
+                        'sysid': sysid,
+                        'compid': compid,
+                        'mission': [],
+                        'count': 0,
+                        'captured_count': 0,
+                        'download_duration': 0.0,
+                        'source': 'active' if is_active_request else 'passive',
+                        'complete': True,
+                        'partial': False
+                    })
+                )
+            except Exception:
+                pass
             return
 
-        # initialize download state with placeholder list
+        # initialize/refresh download state with placeholder list, preserving captured items when possible
+        merged_mission = [None] * int(count)
+        if existing and existing.get('mode') == 'passive':
+            prev = existing.get('mission') or []
+            for idx, item in enumerate(prev):
+                if idx >= int(count):
+                    break
+                if item is not None:
+                    merged_mission[idx] = item
+
+        now = time.time()
         self.download_states[sysid] = {
-            'state': 'downloading',
-            'mission': [None] * int(count),
-            'start_time': time.time(),
+            'state': 'downloading' if is_active_request else 'passive_observing',
+            'mode': 'active' if is_active_request else 'passive',
+            'mission': merged_mission,
+            'start_time': existing.get('start_time', now) if existing else now,
+            'last_activity_ts': now,
+            'retries': 0,
             'target_comp': compid,
         }
+
+        if not is_active_request:
+            self._publish_download_status(
+                sysid,
+                compid,
+                'passive_observing',
+                {'phase': 'mission_count', 'count': int(count), 'source': 'passive'}
+            )
+            return
 
         # request first item (prefer INT)
         src_sys = self.cfg.get("gcs_sysid", 255)
@@ -272,10 +537,10 @@ class MissionManager:
 
         if self._send_to_drone(sysid, out_bytes):
             print(f"[mission_manager] requested mission item seq=0 for {sysid}")
-            self._publish_download_status(sysid, compid, 'request_sent', {'phase': 'mission_request_int', 'seq': 0})
+            self._publish_download_status(sysid, compid, 'request_sent', {'phase': 'mission_request_int', 'seq': 0, 'source': 'active'})
         else:
             print(f"[mission_manager] failed to send mission request for {sysid} (no observed port or send error)")
-            self._publish_download_status(sysid, compid, 'request_send_failed', {'phase': 'mission_request_int', 'seq': 0})
+            self._publish_download_status(sysid, compid, 'request_send_failed', {'phase': 'mission_request_int', 'seq': 0, 'source': 'active'})
 
 
 class MQTTAdapter:
@@ -458,6 +723,14 @@ class MQTTAdapter:
             return sysid, compid
         except Exception:
             return None, None
+
+    def _parse_device_topic(self, topic: str) -> tuple[int | None, int | None, str | None]:
+        parts = topic.split("/")
+        if len(parts) < 4 or parts[0] != "device":
+            return None, None, None
+        sysid, compid = self._parse_device_topic_ids(topic)
+        msg_type = parts[3] if len(parts) > 3 else None
+        return sysid, compid, msg_type
 
     def _resolve_src_ids(self, data: Dict[str, Any] | None) -> tuple[int, int]:
         """Resolve MAVLink source IDs with payload override support.
@@ -653,9 +926,12 @@ class MQTTAdapter:
         client.subscribe("command/+/+/load_waypoints")
         client.subscribe("command/+/+/download_mission")
         client.subscribe("device/+/+/MISSION_REQUEST")
+        client.subscribe("device/+/+/MISSION_REQUEST_INT")
+        client.subscribe("device/+/+/MISSION_REQUEST_LIST")
         client.subscribe("device/+/+/MISSION_ACK")
         client.subscribe("device/+/+/MISSION_COUNT")
         client.subscribe("device/+/+/MISSION_ITEM_INT")
+        client.subscribe("device/+/+/MISSION_ITEM")
         # publish a summary of loaded config so UIs can pick it up
         try:
             cfg_summary = {
@@ -671,11 +947,12 @@ class MQTTAdapter:
     def on_message(self, client, userdata, msg):
         # route commands into transport out queues
         topic = msg.topic
-        try:
-            raw_preview = msg.payload[:256].decode('utf-8', errors='replace')
-        except Exception:
-            raw_preview = '<binary payload>'
-        print(f"[mqtt_adapter] on_message topic={topic} payload_preview={raw_preview}")
+        if self._debug_publish_counts:
+            try:
+                raw_preview = msg.payload[:256].decode('utf-8', errors='replace')
+            except Exception:
+                raw_preview = '<binary payload>'
+            print(f"[mqtt_adapter] on_message topic={topic} payload_preview={raw_preview}")
         parts = topic.split("/")
         if len(parts) >= 4 and parts[0] == "command":
             try:
@@ -778,16 +1055,27 @@ class MQTTAdapter:
             except Exception as e:
                 print("[mqtt_adapter] failed to inject into out_q:", e)
 
-        # handle mission upload responses
-        if topic.startswith("device/") and "MISSION_REQUEST" in topic:
-            sysid, compid = self._parse_device_topic_ids(topic)
-            if sysid is not None and compid is not None:
+        # handle mission upload/download responses
+        sysid, compid, msg_type = self._parse_device_topic(topic) if topic.startswith("device/") else (None, None, None)
+        if sysid is not None and compid is not None and msg_type in ("MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_REQUEST_LIST"):
+            try:
+                payload = json.loads(msg.payload.decode("utf-8"))
+                fields = payload.get("fields", {}) or {}
+                target_sys = fields.get("target_system")
+                target_comp = fields.get("target_component")
                 try:
-                    payload = json.loads(msg.payload.decode("utf-8"))
-                    seq = payload.get("fields", {}).get("seq", 0)
-                    self.mission_manager.handle_mission_request(sysid, compid, seq)
+                    target_sys_int = int(target_sys) if target_sys is not None else None
                 except Exception:
-                    pass
+                    target_sys_int = None
+                # MISSION_REQUEST(_INT) aimed at a GCS sysid is part of upload handshake;
+                # don't classify it as an external mission download request.
+                if msg_type in ("MISSION_REQUEST", "MISSION_REQUEST_INT") and target_sys_int is not None and target_sys_int >= 250:
+                    seq = fields.get("seq", 0)
+                    self.mission_manager.handle_mission_request(sysid, compid, seq)
+                else:
+                    self.mission_manager.observe_external_mission_request(sysid, compid, target_sys_int, target_comp, msg_type)
+            except Exception:
+                pass
         elif topic.startswith("device/") and "MISSION_ACK" in topic:
             sysid, compid = self._parse_device_topic_ids(topic)
             if sysid is not None and compid is not None:
@@ -805,6 +1093,30 @@ class MQTTAdapter:
                 except Exception:
                     pass
         elif topic.startswith("device/") and "MISSION_ITEM_INT" in topic:
+            sysid, compid = self._parse_device_topic_ids(topic)
+            if sysid is not None and compid is not None:
+                try:
+                    payload = json.loads(msg.payload.decode("utf-8"))
+                    fields = payload.get("fields", {})
+                    seq = fields.get("seq", 0)
+                    item_data = {
+                        'seq': seq,
+                        'frame': fields.get('frame', 0),
+                        'command': fields.get('command', 0),
+                        'x': fields.get('x', 0),
+                        'y': fields.get('y', 0),
+                        'z': fields.get('z', 0),
+                        'params': [
+                            fields.get('param1', 0),
+                            fields.get('param2', 0),
+                            fields.get('param3', 0),
+                            fields.get('param4', 0),
+                        ]
+                    }
+                    self.mission_manager.handle_mission_item(sysid, compid, seq, item_data)
+                except Exception:
+                    pass
+        elif topic.startswith("device/") and "MISSION_ITEM" in topic:
             sysid, compid = self._parse_device_topic_ids(topic)
             if sysid is not None and compid is not None:
                 try:
@@ -852,15 +1164,13 @@ class MQTTAdapter:
                         
                         parser = self._mav_parsers[transport_name]
                         if parser is not None:
-                            # Feed the data bytes to the persistent parser
                             messages = []
-                            for b in data:
-                                try:
-                                    msg = parser.parse_char(bytes([b]))
-                                    if msg is not None:
-                                        messages.append(msg)
-                                except Exception:
-                                    pass
+                            try:
+                                parsed = parser.parse_buffer(data)
+                                if parsed:
+                                    messages.extend(parsed)
+                            except Exception:
+                                pass
                             
                             # Process any complete messages
                             for msg_obj in messages:

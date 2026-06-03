@@ -86,35 +86,48 @@ def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, 
     parser = mavutil.mavlink.MAVLink(None) if _MAVLINK_AVAILABLE and decoded_f else None
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Expand OS receive buffer to 4MB to absorb bursts from many drones
+    _rcvbuf = 4 * 1024 * 1024
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _rcvbuf)
+        actual = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        print(f"[transport:{name}] SO_RCVBUF requested={_rcvbuf} actual={actual}")
+    except Exception as e:
+        print(f"[transport:{name}] could not set SO_RCVBUF: {e}")
     sock.bind(bind_addr)
     sock.settimeout(0.5)
     print(f"[transport:{name}] listening UDP {bind_addr}")
+    # Use non-blocking mode to drain all queued packets per iteration
+    sock.setblocking(False)
     try:
         while True:
-            # receive
-            try:
-                data, addr = sock.recvfrom(recv_buf)
-                if data:
-                    if debug:
-                        print(f"[transport:{name}] recv {len(data)} bytes from {addr}")
-                    _log_raw(raw_f, "in", name, addr, data)
-                    _log_decoded(decoded_f, parser, "in", name, addr, data)
-                    router_in_q.put((name, addr, data))
-                    # also publish a copy to mqtt publisher queue (non-blocking)
-                    if mqtt_pub_q is not None:
-                        try:
-                            mqtt_pub_q.put_nowait((name, addr, data))
-                        except Exception:
-                            pass
-            except socket.timeout:
-                pass
+            # Drain all available inbound packets before handling outbound
+            got_any = False
+            while True:
+                try:
+                    data, addr = sock.recvfrom(recv_buf)
+                    if data:
+                        got_any = True
+                        if debug:
+                            print(f"[transport:{name}] recv {len(data)} bytes from {addr}")
+                        _log_raw(raw_f, "in", name, addr, data)
+                        _log_decoded(decoded_f, parser, "in", name, addr, data)
+                        router_in_q.put((name, addr, data))
+                        if mqtt_pub_q is not None:
+                            try:
+                                mqtt_pub_q.put_nowait((name, addr, data))
+                            except Exception:
+                                pass
+                except BlockingIOError:
+                    break
+                except Exception:
+                    break
 
             # check outbound queue
             try:
                 while not port_out_q.empty():
                     dest, outb = port_out_q.get_nowait()
                     if dest is None:
-                        # no destination specified, drop
                         continue
                     try:
                         if debug:
@@ -123,13 +136,13 @@ def udp_port_process(name: str, bind_addr: Tuple[str, int], router_in_q: Queue, 
                         _log_decoded(decoded_f, parser, "out", name, dest, outb)
                         sock.sendto(outb, dest)
                     except Exception:
-                        # transient send failure; ignore
                         pass
             except Exception:
-                # transient, continue loop
                 pass
 
-            time.sleep(0.001)
+            # Brief yield so other threads can run; no sleep when packets are flowing
+            if not got_any:
+                time.sleep(0.001)
     except KeyboardInterrupt:
         print(f"[transport:{name}] stopping")
     finally:

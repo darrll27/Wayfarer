@@ -216,15 +216,27 @@ def encode_mission_request_int(target_sys: int, target_comp: int, seq: int, miss
     """Encode MISSION_REQUEST_INT message."""
     try:
         mav, buf = _make_mavlink_writer(src_sys, src_comp)
-        # mission_request_int_encode historically takes (target_sys, target_comp, seq)
-        # newer versions may accept mission_type as a fourth argument; try the
-        # 3-arg form first and fall back to 4-arg if needed.
         try:
             msg = mav.mission_request_int_encode(target_sys, target_comp, seq)
         except TypeError:
             msg = mav.mission_request_int_encode(target_sys, target_comp, seq, mission_type)
     except Exception as e:
         raise RuntimeError(f"failed to encode MISSION_REQUEST_INT: {e}") from e
+
+    mav.send(msg)
+    return buf.getvalue()
+
+
+def encode_mission_request(target_sys: int, target_comp: int, seq: int, mission_type: int = 0, src_sys: int = 255, src_comp: int = 1) -> bytes:
+    """Encode MISSION_REQUEST message (non-INT fallback for older firmware)."""
+    try:
+        mav, buf = _make_mavlink_writer(src_sys, src_comp)
+        try:
+            msg = mav.mission_request_encode(target_sys, target_comp, seq)
+        except TypeError:
+            msg = mav.mission_request_encode(target_sys, target_comp, seq, mission_type)
+    except Exception as e:
+        raise RuntimeError(f"failed to encode MISSION_REQUEST: {e}") from e
 
     mav.send(msg)
     return buf.getvalue()

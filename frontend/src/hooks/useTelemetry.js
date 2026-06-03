@@ -2,8 +2,32 @@ import {useEffect, useRef, useState} from 'react'
 import subscriptions from '../subscriptions.json'
 
 const isElectron = typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Electron') || (typeof window !== 'undefined' && window.process && window.process.versions && window.process.versions.electron)
+const MISSION_CACHE_KEY = 'nomad_mission_cache_v1'
+
+function loadMissionCache() {
+  if (typeof window === 'undefined') return {downloadedMissions: [], downloadedMissionBySysid: {}}
+  try {
+    const raw = window.localStorage.getItem(MISSION_CACHE_KEY)
+    if (!raw) return {downloadedMissions: [], downloadedMissionBySysid: {}}
+    const parsed = JSON.parse(raw)
+    const list = Array.isArray(parsed && parsed.downloadedMissions) ? parsed.downloadedMissions : []
+    const bySysid = parsed && typeof parsed.downloadedMissionBySysid === 'object' && parsed.downloadedMissionBySysid
+      ? parsed.downloadedMissionBySysid
+      : {}
+    const markStale = (m) => ({...m, stale: true})
+    return {
+      downloadedMissions: list.map(markStale).slice(0, 20),
+      downloadedMissionBySysid: Object.fromEntries(
+        Object.entries(bySysid).map(([k, v]) => [k, markStale(v)])
+      )
+    }
+  } catch (e) {
+    return {downloadedMissions: [], downloadedMissionBySysid: {}}
+  }
+}
 
 export default function useTelemetry(addToast) {
+  const initialMissionCache = loadMissionCache()
   const [connStatus, setConnStatus] = useState('disconnected')
   const [telemetry, setTelemetry] = useState([])
   const [backendStatus, setBackendStatus] = useState(null)
@@ -12,8 +36,10 @@ export default function useTelemetry(addToast) {
   const [brokerMissing, setBrokerMissing] = useState(false)
   const [brokerError, setBrokerError] = useState(null)
   const [brokerStatus, setBrokerStatus] = useState(null)
-  const [downloadedMissions, setDownloadedMissions] = useState([])
+  const [downloadedMissions, setDownloadedMissions] = useState(initialMissionCache.downloadedMissions)
+  const [downloadedMissionBySysid, setDownloadedMissionBySysid] = useState(initialMissionCache.downloadedMissionBySysid)
   const [missionDownloadStatusBySysid, setMissionDownloadStatusBySysid] = useState({})
+  const [missionDownloadLogBySysid, setMissionDownloadLogBySysid] = useState({})
 
   const clientRef = useRef(null)
   const brokerRef = useRef(null)
@@ -22,10 +48,75 @@ export default function useTelemetry(addToast) {
   const lastMessageTsRef = useRef(0)
   const reconnectingRef = useRef(false)
   const connStatusRef = useRef('disconnected')
+  const recentMissionEventRef = useRef({})
+  const recentMissionToastRef = useRef({})
+
+  function isDuplicateMissionEvent(signature, windowMs = 8000) {
+    const now = Date.now()
+    const seenTs = Number(recentMissionEventRef.current[signature] || 0)
+    recentMissionEventRef.current[signature] = now
+    if (seenTs > 0 && (now - seenTs) <= windowMs) return true
+    // prune old keys occasionally
+    if (Object.keys(recentMissionEventRef.current).length > 400) {
+      const minTs = now - 120000
+      recentMissionEventRef.current = Object.fromEntries(
+        Object.entries(recentMissionEventRef.current).filter(([, ts]) => Number(ts) >= minTs)
+      )
+    }
+    return false
+  }
+
+  function shouldShowMissionToast(signature, windowMs = 12000) {
+    const now = Date.now()
+    const seenTs = Number(recentMissionToastRef.current[signature] || 0)
+    recentMissionToastRef.current[signature] = now
+    return !(seenTs > 0 && (now - seenTs) <= windowMs)
+  }
+
+  function appendMissionDownloadLog(sysid, entry) {
+    const key = String(sysid ?? 'unknown')
+    const withTs = {
+      ...entry,
+      ts: Number(entry && entry.ts) || Date.now()
+    }
+    setMissionDownloadLogBySysid((prev) => {
+      const existing = Array.isArray(prev[key]) ? prev[key] : []
+      const latest = existing[0]
+      if (
+        latest &&
+        String(latest.status || '') === String(withTs.status || '') &&
+        String(latest.phase || '') === String(withTs.phase || '') &&
+        Number(latest.seq ?? -1) === Number(withTs.seq ?? -1) &&
+        String(latest.source || '') === String(withTs.source || '') &&
+        (Number(withTs.ts) - Number(latest.ts || 0)) <= 2000
+      ) {
+        return prev
+      }
+      return {
+        ...prev,
+        [key]: [withTs].concat(existing).slice(0, 120)
+      }
+    })
+  }
 
   useEffect(() => {
     connStatusRef.current = connStatus
   }, [connStatus])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(
+        MISSION_CACHE_KEY,
+        JSON.stringify({
+          downloadedMissions,
+          downloadedMissionBySysid
+        })
+      )
+    } catch (e) {
+      // ignore cache write failures
+    }
+  }, [downloadedMissions, downloadedMissionBySysid])
 
   useEffect(() => {
     addToastRef.current = addToast
@@ -142,38 +233,77 @@ export default function useTelemetry(addToast) {
             const obj = JSON.parse(msg)
             if (topic.endsWith('/status')) {
               const sysidKey = String(obj.sysid ?? 'unknown')
+              const statusEntry = {
+                sysid: obj.sysid ?? null,
+                status: String(obj.status || 'unknown'),
+                phase: obj.phase || null,
+                seq: typeof obj.seq === 'number' ? obj.seq : null,
+                ts: Date.now(),
+                source: 'status-topic'
+              }
+              const statusSig = [
+                sysidKey,
+                statusEntry.status,
+                statusEntry.phase || '',
+                String(statusEntry.seq ?? ''),
+                statusEntry.source
+              ].join('|')
+              if (isDuplicateMissionEvent(statusSig, 8000)) return
               setMissionDownloadStatusBySysid((prev) => ({
                 ...prev,
-                [sysidKey]: {
-                  sysid: obj.sysid ?? null,
-                  status: String(obj.status || 'unknown'),
-                  phase: obj.phase || null,
-                  seq: typeof obj.seq === 'number' ? obj.seq : null,
-                  ts: Date.now(),
-                  source: 'status-topic'
-                }
+                [sysidKey]: statusEntry
               }))
-              if (addToastRef.current) {
+              appendMissionDownloadLog(obj.sysid, statusEntry)
+              if (addToastRef.current && shouldShowMissionToast(`status:${statusSig}`, 10000)) {
                 addToastRef.current({title: 'Mission download status', body: `${obj.status || 'unknown'} (sysid ${obj.sysid ?? '?'})`})
               }
             } else {
-              setDownloadedMissions((prev) => [obj].concat(prev).slice(0, 10))
+              const now = Date.now()
+              const isComplete = obj.complete === false || obj.partial === true ? false : true
+              const payloadSig = [
+                String(obj.sysid ?? 'unknown'),
+                String(obj.count ?? ''),
+                String(obj.captured_count ?? ''),
+                String(isComplete ? 'complete' : 'partial')
+              ].join('|')
+              if (isDuplicateMissionEvent(`payload:${payloadSig}`, isComplete ? 4800 : 3200)) return
+              const normalizedMission = {
+                ...obj,
+                ts: Number(obj.ts) || now,
+                stale: false
+              }
+              setDownloadedMissions((prev) => [normalizedMission].concat(prev.filter((item) => Number(item.sysid) !== Number(obj.sysid))).slice(0, 20))
               if (typeof obj.sysid !== 'undefined') {
                 const sysidKey = String(obj.sysid)
-                setMissionDownloadStatusBySysid((prev) => ({
+                setDownloadedMissionBySysid((prev) => ({
                   ...prev,
-                  [sysidKey]: {
-                    sysid: obj.sysid,
-                    status: 'completed',
-                    phase: null,
-                    seq: null,
-                    ts: Date.now(),
-                    source: 'mission-payload'
-                  }
+                  [sysidKey]: normalizedMission
                 }))
               }
-              if (addToastRef.current) {
-                addToastRef.current({title: 'Mission downloaded', body: `From sysid ${obj.sysid}: ${obj.count} waypoints`})
+              if (typeof obj.sysid !== 'undefined') {
+                const sysidKey = String(obj.sysid)
+                const missionStatus = {
+                  sysid: obj.sysid,
+                  status: isComplete ? 'completed' : 'intercepting',
+                  phase: null,
+                  seq: null,
+                  ts: now,
+                  source: 'mission-payload',
+                  count: Number(obj.count) || Number(obj.captured_count) || 0,
+                  downloadDuration: Number(obj.download_duration) || null
+                }
+                setMissionDownloadStatusBySysid((prev) => ({
+                  ...prev,
+                  [sysidKey]: missionStatus
+                }))
+                appendMissionDownloadLog(obj.sysid, missionStatus)
+              }
+              if (addToastRef.current && shouldShowMissionToast(`payload:${payloadSig}`, isComplete ? 16000 : 12000)) {
+                if (isComplete) {
+                  addToastRef.current({title: 'Mission downloaded', body: `From sysid ${obj.sysid}: ${obj.count} waypoints`})
+                } else {
+                  addToastRef.current({title: 'Mission intercept', body: `Sysid ${obj.sysid}: ${obj.captured_count || 0}/${obj.count || '?'} waypoints observed`})
+                }
               }
             }
           } catch (e) {
@@ -189,18 +319,26 @@ export default function useTelemetry(addToast) {
             if (status.includes('download') || status.includes('request')) {
               const parts = topic.split('/')
               const sysidKey = String(obj.sysid ?? parts[1] ?? 'unknown')
+              const ackEntry = {
+                sysid: obj.sysid ?? (Number(parts[1]) || null),
+                status,
+                phase: null,
+                seq: null,
+                ts: Date.now(),
+                source: 'command-ack'
+              }
+              const ackSig = [
+                String(sysidKey),
+                String(status || ''),
+                String(ackEntry.source)
+              ].join('|')
+              if (isDuplicateMissionEvent(`ack:${ackSig}`, 8000)) return
               setMissionDownloadStatusBySysid((prev) => ({
                 ...prev,
-                [sysidKey]: {
-                  sysid: obj.sysid ?? (Number(parts[1]) || null),
-                  status,
-                  phase: null,
-                  seq: null,
-                  ts: Date.now(),
-                  source: 'command-ack'
-                }
+                [sysidKey]: ackEntry
               }))
-              if (addToastRef.current) {
+              appendMissionDownloadLog(obj.sysid ?? (Number(parts[1]) || null), ackEntry)
+              if (addToastRef.current && shouldShowMissionToast(`ack:${ackSig}`, 10000)) {
                 addToastRef.current({title: 'Download command ACK', body: status})
               }
             }
@@ -323,6 +461,14 @@ export default function useTelemetry(addToast) {
     }
   }
 
+  function clearDownloadedMissions() {
+    setDownloadedMissions([])
+    setDownloadedMissionBySysid({})
+    setMissionDownloadStatusBySysid({})
+    setMissionDownloadLogBySysid({})
+    try { window.localStorage.removeItem(MISSION_CACHE_KEY) } catch (e) {}
+  }
+
   return {
     connStatus,
     telemetry,
@@ -333,10 +479,13 @@ export default function useTelemetry(addToast) {
     brokerError,
     brokerStatus,
     downloadedMissions,
+    downloadedMissionBySysid,
     missionDownloadStatusBySysid,
+    missionDownloadLogBySysid,
     clientRef,
     retryFetchBroker,
     fetchBrokerConfig,
-    connectWithBroker
+    connectWithBroker,
+    clearDownloadedMissions
   }
 }

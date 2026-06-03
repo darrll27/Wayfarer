@@ -10,7 +10,7 @@ import MissionsWorkspace from './workspaces/MissionsWorkspace'
 import LogsWorkspace from './workspaces/LogsWorkspace'
 import SettingsWorkspace from './workspaces/SettingsWorkspace'
 import useTelemetry from './hooks/useTelemetry'
-import {isNonBirdSysid, parseDeviceTopic, useBirds} from './hooks/useBirds'
+import {evaluateBirdStatus, isNonBirdSysid, parseDeviceTopic, useBirds} from './hooks/useBirds'
 
 const isElectron = typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Electron') || (typeof window !== 'undefined' && window.process && window.process.versions && window.process.versions.electron)
 
@@ -44,11 +44,14 @@ export default function App() {
   const [mapScope, setMapScope] = useState('all')
   const [qgcMapView, setQgcMapView] = useState('map')
   const [showFlightPaths, setShowFlightPaths] = useState(true)
+  const [showPlannedLayers, setShowPlannedLayers] = useState(false)
+  const [showDownloadedLayers, setShowDownloadedLayers] = useState(true)
   const [selectedFile, setSelectedFile] = useState(null)
   const [sendSysid, setSendSysid] = useState(1)
   const [sendCompid, setSendCompid] = useState(1)
   const [downloadSysid, setDownloadSysid] = useState(1)
   const [downloadCompid, setDownloadCompid] = useState(1)
+  const [wpFiles, setWpFiles] = useState([])
   const [dataLossGraceMs, setDataLossGraceMs] = useState(() => {
     if (typeof window === 'undefined') return 1000
     const stored = Number(window.localStorage.getItem('telemetryLossGraceMs'))
@@ -67,23 +70,21 @@ export default function App() {
 
   const mapRef = useRef(null)
   const mapLayersRef = useRef([])
+  const plannedRenderSeqRef = useRef(0)
   const qgcMapRef = useRef(null)
   const qgcMapLayersRef = useRef([])
   const qgcBaseLayerRef = useRef(null)
   const qgcHasAutoFocusedRef = useRef(false)
 
+  // Only allow one toast at a time
   const addToast = useCallback((t) => {
     const id = Date.now() + Math.random()
     const entry = {...t, id, ts: Date.now(), read: false}
-    setToasts((s) => [entry].concat(s).slice(0, 6))
+    setToasts([entry])
     setNotifications((s) => [entry].concat(s).slice(0, 100))
     setTimeout(() => {
       setToasts((s) => s.filter(x => x.id !== id))
     }, 6000)
-  }, [])
-
-  const clearNotifications = useCallback(() => {
-    setNotifications([])
   }, [])
 
   const {
@@ -95,9 +96,12 @@ export default function App() {
     brokerMissing,
     brokerError,
     downloadedMissions,
+    downloadedMissionBySysid,
     missionDownloadStatusBySysid,
+    missionDownloadLogBySysid,
     clientRef,
-    retryFetchBroker
+    retryFetchBroker,
+    clearDownloadedMissions
   } = useTelemetry(addToast)
 
   const {
@@ -109,11 +113,59 @@ export default function App() {
     fleetStats
   } = useBirds(telemetry, birdFilter, selectedBird, dataLossGraceMs, systemRange)
 
+  // Focus all birds on the missions map
+  const focusBirdsOnMap = useCallback(() => {
+    if (!window.L || !mapRef.current) return
+    const points = birdList
+      .filter((bird) => bird.lat != null && bird.lon != null)
+      .map((bird) => [bird.lat, bird.lon])
+    if (points.length === 0) return
+    const bounds = window.L.latLngBounds(points)
+    mapRef.current.fitBounds(bounds.pad(0.3), {maxZoom: FOCUS_BIRDS_MAX_ZOOM})
+  }, [birdList])
+
+  // Focus all downloaded missions on the missions map
+  const focusMissionsOnMap = useCallback(() => {
+    if (!window.L || !mapRef.current) return
+    const allLatLngs = []
+    downloadedMissions.forEach((mission) => {
+      if (mission.mission && mission.mission.length > 0) {
+        mission.mission.forEach(wp => {
+          allLatLngs.push([wp.x / 1e7, wp.y / 1e7])
+        })
+      }
+    })
+    if (allLatLngs.length === 0) return
+    const bounds = window.L.latLngBounds(allLatLngs)
+    mapRef.current.fitBounds(bounds.pad(0.3))
+  }, [downloadedMissions])
+
+  const clearNotifications = useCallback(() => {
+    setNotifications([])
+  }, [])
+
+
   const backendStatusGraceMs = 7000
   const backendIsOnline = backendHeartbeatTs > 0 && Date.now() - backendHeartbeatTs <= backendStatusGraceMs
   const backendStatusLabel = backendIsOnline
     ? (backendStatus && backendStatus.ok === false ? 'offline' : 'online')
     : 'unknown'
+  const visibleMissionTargets = useMemo(() => {
+    const now = Date.now()
+    return (birdList || [])
+      .filter((bird) => !isNonBirdSysid(bird && bird.sysid, systemRange))
+      .filter((bird) => {
+        if (!bird) return false
+        const status = evaluateBirdStatus(bird, now)
+        return status.isLive && bird.lat !== null && bird.lon !== null
+      })
+      .map((bird) => ({
+        sysid: Number(bird.sysid),
+        compid: Number(bird.compid) || 1
+      }))
+      .filter((target) => Number.isFinite(target.sysid))
+      .sort((a, b) => a.sysid - b.sysid)
+  }, [birdList, systemRange])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -226,10 +278,11 @@ export default function App() {
       })
       mapLayersRef.current = mapLayersRef.current.filter(l => !(l.options && l.options.downloadedMission))
     }
+    if (!showDownloadedLayers) return
 
     downloadedMissions.forEach((mission) => {
       if (mission.mission && mission.mission.length > 0) {
-        const latlngs = mission.mission.map(wp => [wp.y / 1e7, wp.x / 1e7])
+        const latlngs = mission.mission.map(wp => [wp.x / 1e7, wp.y / 1e7])
         const polyline = window.L.polyline(latlngs, {
           color: '#ff6600',
           weight: 3,
@@ -238,7 +291,7 @@ export default function App() {
         }).addTo(mapRef.current)
 
         mission.mission.forEach((wp, wpIdx) => {
-          const marker = window.L.circleMarker([wp.y / 1e7, wp.x / 1e7], {
+          const marker = window.L.circleMarker([wp.x / 1e7, wp.y / 1e7], {
             radius: 7,
             color: '#ff6600',
             fillColor: '#ff6600',
@@ -253,6 +306,50 @@ export default function App() {
         mapLayersRef.current.push(polyline)
       }
     })
+  }
+
+  async function updatePlannedMissionsOnMap() {
+    if (!window.L || !mapRef.current) return
+    const renderSeq = ++plannedRenderSeqRef.current
+    if (mapLayersRef.current) {
+      mapLayersRef.current.forEach(l => {
+        if (l.options && l.options.plannedWaypoint) {
+          try { l.remove() } catch (e){}
+        }
+      })
+      mapLayersRef.current = mapLayersRef.current.filter(l => !(l.options && l.options.plannedWaypoint))
+    }
+    if (!showPlannedLayers) return
+    const files = Array.isArray(wpFiles) ? wpFiles : []
+    const colors = ['#ef4444', '#f97316', '#f59e0b', '#22c55e', '#06b6d4', '#3b82f6', '#a855f7', '#ec4899']
+    let colorIdx = 0
+
+    for (const file of files) {
+      const filename = file && file.filename
+      if (!filename) continue
+      try {
+        const r = await fetch(`/api/waypoints/${filename}`)
+        if (!r.ok) continue
+        const j = await r.json()
+        if (renderSeq !== plannedRenderSeqRef.current) return
+        const w = Array.isArray(j.waypoints) ? j.waypoints : []
+        const latlngs = w
+          .filter((pt) => Number.isFinite(Number(pt.lat)) && Number.isFinite(Number(pt.lon)))
+          .map((pt) => [Number(pt.lat), Number(pt.lon)])
+        if (!latlngs.length) continue
+        const color = colors[colorIdx % colors.length]
+        colorIdx += 1
+        const poly = window.L.polyline(latlngs, {color, weight: 2, opacity: 0.85, plannedWaypoint: true}).addTo(mapRef.current)
+        mapLayersRef.current.push(poly)
+        latlngs.forEach((latlng, idx) => {
+          const m = window.L.circleMarker(latlng, {radius: 3, color, fillColor: color, fillOpacity: 0.85, plannedWaypoint: true}).addTo(mapRef.current)
+          m.bindTooltip(`${filename}<br/>#${idx + 1}`, {permanent: false})
+          mapLayersRef.current.push(m)
+        })
+      } catch (e) {
+        // ignore per-file render failures
+      }
+    }
   }
 
   async function drawFileOnMap(filename) {
@@ -284,6 +381,16 @@ export default function App() {
       mapRef.current.fitBounds(poly.getBounds().pad(0.4))
     } catch (e) {
       console.error('drawFileOnMap failed', e)
+    }
+  }
+
+  function zoomMissionMap(step = 1) {
+    if (!mapRef.current) return
+    try {
+      const current = mapRef.current.getZoom()
+      mapRef.current.setZoom(current + step)
+    } catch (e) {
+      // ignore
     }
   }
 
@@ -466,7 +573,13 @@ export default function App() {
       updateDownloadedMissionsOnMap()
       updateFlightPathsOnMap()
     }
-  }, [telemetry, showFlightPaths, downloadedMissions, workspace])
+  }, [telemetry, showFlightPaths, downloadedMissions, showDownloadedLayers, workspace])
+
+  useEffect(() => {
+    if (workspace === 'missions' && mapRef.current) {
+      updatePlannedMissionsOnMap()
+    }
+  }, [workspace, showPlannedLayers, wpFiles])
 
   useEffect(() => {
     if (workspace === 'qgc' && qgcMapRef.current) {
@@ -514,8 +627,6 @@ export default function App() {
       console.error('failed to load waypoint files', e)
     }
   }
-
-  const [wpFiles, setWpFiles] = useState([])
 
   function groupWaypointFiles(files) {
     const grouped = {}
@@ -574,15 +685,19 @@ export default function App() {
   }
 
   async function downloadFromAllDrones() {
-    for (let sysid = 1; sysid <= 6; sysid++) {
+    if (!visibleMissionTargets.length) {
+      addToast({title: 'No visible drones', body: 'No live birds with position are currently visible for mission download.'})
+      return
+    }
+    for (const target of visibleMissionTargets) {
       try {
-        await downloadMissionFromDrone({sysid, compid: 1})
+        await downloadMissionFromDrone({sysid: target.sysid, compid: target.compid || 1})
         await new Promise(resolve => setTimeout(resolve, 100))
       } catch (e) {
-        console.error(`Failed to download from sysid ${sysid}:`, e)
+        console.error(`Failed to download from sysid ${target.sysid}:`, e)
       }
     }
-    addToast({title: 'Bulk download initiated', body: 'Requested downloads from sysid 1-6'})
+    addToast({title: 'Bulk download initiated', body: `Requested ${visibleMissionTargets.length} visible drones`})
   }
 
   async function sendToDronePrompt(filename) {
@@ -751,9 +866,14 @@ export default function App() {
               setSelectedMission={setSelectedMission}
               showFlightPaths={showFlightPaths}
               setShowFlightPaths={setShowFlightPaths}
+              showPlannedLayers={showPlannedLayers}
+              setShowPlannedLayers={setShowPlannedLayers}
+              showDownloadedLayers={showDownloadedLayers}
+              setShowDownloadedLayers={setShowDownloadedLayers}
               wpFiles={wpFiles}
               groupWaypointFiles={groupWaypointFiles}
               drawFileOnMap={drawFileOnMap}
+              zoomMissionMap={zoomMissionMap}
               sendToDronePrompt={sendToDronePrompt}
               selectedFile={selectedFile}
               setSelectedFile={setSelectedFile}
@@ -769,8 +889,16 @@ export default function App() {
               downloadMissionFromDrone={downloadMissionFromDrone}
               downloadFromAllDrones={downloadFromAllDrones}
               missionDownloadStatusBySysid={missionDownloadStatusBySysid}
+              missionDownloadLogBySysid={missionDownloadLogBySysid}
               downloadedMissions={downloadedMissions}
+              downloadedMissionBySysid={downloadedMissionBySysid}
+              birdList={birdList}
+              systemRange={systemRange}
+              visibleMissionTargets={visibleMissionTargets}
               selectedBird={selectedBird}
+              focusBirdsOnMap={focusBirdsOnMap}
+              focusMissionsOnMap={focusMissionsOnMap}
+              clearDownloadedMissions={clearDownloadedMissions}
             />
           )}
 

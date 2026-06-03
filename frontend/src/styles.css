@@ -904,6 +904,87 @@ button.ghost {
   gap: 8px;
 }
 
+.mission-target-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.mission-target-card {
+  text-align: left;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(10, 16, 30, 0.8);
+  color: var(--text);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+
+.mission-target-card:hover {
+  transform: translateY(-1px);
+}
+
+.mission-target-card.unavailable {
+  opacity: 0.65;
+  border-color: rgba(100, 116, 139, 0.32);
+  background: rgba(30, 41, 59, 0.42);
+}
+
+.mission-target-card.online {
+  border-color: rgba(125, 211, 252, 0.35);
+  background: linear-gradient(180deg, rgba(15, 31, 52, 0.9), rgba(9, 19, 33, 0.9));
+}
+
+.mission-target-card.not-downloaded {
+  border-color: rgba(248, 113, 113, 0.52);
+  box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.4);
+}
+
+.mission-target-card.pending {
+  border-color: rgba(56, 189, 248, 0.62);
+  box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.48);
+}
+
+.mission-target-card.downloaded {
+  border-color: rgba(74, 222, 128, 0.75);
+  box-shadow: inset 0 0 0 1px rgba(74, 222, 128, 0.6);
+}
+
+.mission-target-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mission-target-id {
+  font-weight: 700;
+}
+
+.mission-target-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.mission-target-dot.online {
+  background: #38bdf8;
+  box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.2);
+}
+
+.mission-target-dot.offline {
+  background: #64748b;
+}
+
+.mission-target-meta {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .download-status-row {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-sm);
